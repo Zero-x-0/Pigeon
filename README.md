@@ -32,7 +32,7 @@ A high-performance, memory-safe, portable desktop utility for writing, formattin
 
 ### 🐧 Full Linux & Windows Parity
 - **True Cross-Platform:** Complete feature set across Windows 10/11, Kali Linux, Ubuntu, Debian, Fedora, and openSUSE.
-- **Universal File Chooser:** Automatically integrates with native file pickers (`zenity`, `kdialog`, Windows Explorer) and includes a **built-in visual file browser** for minimal or air-gapped systems (like out-of-the-box Kali Linux in VirtualBox).
+- **Universal File Chooser:** Automatically integrates with native file pickers.
 - **Drag & Drop:** Drag any `.iso`, `.img`, `.bin`, `.vhd`, or `.raw` image directly from your desktop or file manager into the app.
 
 ### 🛡️ Defensive Drive Safety Guard

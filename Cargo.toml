@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/usb-x-core",
+    "crates/usb-x-image",
+    "crates/usb-x-platform",
+    "crates/usb-x-engine",
+    "crates/usb-x-catalog",
+    "crates/usb-x-app",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+authors = ["USB X Contributors"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/usb-x/usb-x"
+

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=USB X
+Comment=Fast, Lightweight Bootable USB Creator
+GenericName=Bootable USB Creator
+Exec=usb-x
+Icon=usb-x
+Terminal=false
+Type=Application
+Categories=System;Utility;Archiving;
+Keywords=usb;flash;boot;iso;image;format;rufus;
+StartupNotify=true
+

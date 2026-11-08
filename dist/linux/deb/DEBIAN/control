@@ -1,0 +1,11 @@
+Package: usb-x
+Version: 0.1.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: USB X Team <support@usb-x.org>
+Description: High-performance, lightweight bootable USB drive creator
+ Fast and reliable bootable USB formatting and image flasher inspired
+ by Rufus, supporting Windows 10/11 with autounattend bypass, Linux
+ ISOHybrid, and raw disk images.
+

@@ -1,0 +1,23 @@
+[package]
+name = "usb-x-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+cc = "1.0"
+
+[dependencies]
+usb-x-core = { path = "../usb-x-core" }
+tempfile = "3.27.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

@@ -1,0 +1,23 @@
+[package]
+name = "pigeon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+usb-x-core = { path = "../usb-x-core" }
+usb-x-image = { path = "../usb-x-image" }
+usb-x-platform = { path = "../usb-x-platform" }
+usb-x-engine = { path = "../usb-x-engine" }
+usb-x-catalog = { path = "../usb-x-catalog" }
+
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "x11",
+    "wayland",
+] }
+egui = "0.31"
+arboard = "3.7.0"
+webbrowser = "1.2.6"
+

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Pigeon
+Comment=Fast, Lightweight Bootable USB Creator
+GenericName=Bootable USB Creator
+Exec=pigeon
+Icon=pigeon
+Terminal=false
+Type=Application
+Categories=System;Utility;Archiving;
+Keywords=pigeon;usb;flash;boot;iso;image;format;rufus;
+StartupNotify=true
+

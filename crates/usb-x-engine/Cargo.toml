@@ -1,0 +1,10 @@
+[package]
+name = "usb-x-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+usb-x-core = { path = "../usb-x-core" }
+usb-x-image = { path = "../usb-x-image" }
+usb-x-platform = { path = "../usb-x-platform" }

@@ -1,0 +1,10 @@
+Package: pigeon
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Pigeon Team <support@pigeon-usb.org>
+Description: High-performance, lightweight bootable USB drive creator
+ Fast and reliable bootable USB formatting and image flasher,
+ supporting Windows 10/11 with autounattend bypass, Linux
+ ISOHybrid, and raw disk images.

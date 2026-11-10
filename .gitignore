@@ -9,6 +9,9 @@ dist/linux/*.AppImage
 dist/linux/*.deb
 dist/linux/*.rpm
 
+# Compiled release binaries & distribution packages
+release/
+
 # OS & Editor files
 .DS_Store
 Thumbs.db

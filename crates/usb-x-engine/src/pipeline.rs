@@ -226,27 +226,82 @@ fn run_pipeline(
                     }
                 }
 
-                // 2. Format volume or recreate healthy partition if the drive is unallocated
+                // 2. Format volume or recreate healthy partition if the drive is unallocated or multi-partitioned
                 #[allow(unused_assignments)]
                 let mut mp_final = String::new();
 
                 #[cfg(windows)]
                 {
-                    if let Some(ref mp) = target_mp {
-                        // Existing partition exists! Format it in-place using native Win32 FormatEx (NEVER leaves in unallocated space!)
-                        let _ = sender.send(OperationEvent::StageChanged {
-                            stage: OperationStage::Formatting,
-                            message: format!("Formatting partition {} as {} ({}) via native Win32 FormatEx...", mp, fs_str, vol_label),
-                        });
-                        let fmt_res = usb_x_platform::format_drive_volume(mp, fs_str, &vol_label, true, 0);
-                        mp_final = mp.clone();
-                        usb_x_platform::notify_drive_ready(&mp_final);
-                        if let Err(err) = fmt_res {
-                            let _ = sender.send(OperationEvent::Log {
-                                level: LogLevel::Warn,
-                                timestamp: "Now".to_string(),
-                                message: format!("Format notice (continuing with volume {}): {}", mp, err),
+                    let is_fat32 = matches!(file_system, usb_x_core::types::FileSystem::Fat32);
+                    #[allow(unused_mut)]
+            let mut has_multiple_partitions = device.partitions.len() > 1;
+
+                    if let Some(disk_num) = disk_num_opt {
+                        if disk_num != 0 {
+                            let vols = usb_x_platform::get_volumes_for_disk(disk_num);
+                            if vols.len() > 1 {
+                                has_multiple_partitions = true;
+                            }
+                        }
+                    }
+
+                    if has_multiple_partitions {
+                        // User requirement: "if usb have multipal partions so delete all partions and recreate partions and formate then start wrighting image"
+                        if let Some(disk_num) = disk_num_opt {
+                            if disk_num != 0 {
+                                let _ = sender.send(OperationEvent::StageChanged {
+                                    stage: OperationStage::Partitioning,
+                                    message: format!("Multiple partitions detected on PhysicalDrive{}. Deleting all partitions...", disk_num),
+                                });
+                                let _ = sender.send(OperationEvent::Log {
+                                    level: LogLevel::Info,
+                                    timestamp: "Now".to_string(),
+                                    message: format!(
+                                        "Cleaning PhysicalDrive{}: wiping all old partitions (MBR/GPT) and recreating single 100% capacity partition...",
+                                        disk_num
+                                    ),
+                                });
+
+                                let clean_res = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, is_fat32);
+                                if let Err(err) = clean_res {
+                                    let _ = sender.send(OperationEvent::Log {
+                                        level: LogLevel::Warn,
+                                        timestamp: "Now".to_string(),
+                                        message: format!("Partition wipe notice: {}", err),
+                                    });
+                                }
+
+                                // Wait for Windows PnP MountMgr to mount and assign a drive letter to the new partition
+                                if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
+                                    let _ = sender.send(OperationEvent::StageChanged {
+                                        stage: OperationStage::Formatting,
+                                        message: format!("Formatting clean partition {} as {} ({}) via native Win32 FormatEx...", cand, fs_str, vol_label),
+                                    });
+                                    let _ = usb_x_platform::format_drive_volume(&cand, fs_str, &vol_label, true, 0);
+                                    mp_final = cand.clone();
+                                    usb_x_platform::notify_drive_ready(&cand);
+                                }
+                            }
+                        }
+                    }
+
+                    if mp_final.is_empty() {
+                        // Single healthy partition path or fallback
+                        if let Some(ref mp) = target_mp {
+                            let _ = sender.send(OperationEvent::StageChanged {
+                                stage: OperationStage::Formatting,
+                                message: format!("Formatting partition {} as {} ({}) via native Win32 FormatEx...", mp, fs_str, vol_label),
                             });
+                            let fmt_res = usb_x_platform::format_drive_volume(mp, fs_str, &vol_label, true, 0);
+                            mp_final = mp.clone();
+                            usb_x_platform::notify_drive_ready(&mp_final);
+                            if let Err(err) = fmt_res {
+                                let _ = sender.send(OperationEvent::Log {
+                                    level: LogLevel::Warn,
+                                    timestamp: "Now".to_string(),
+                                    message: format!("Format notice (continuing with volume {}): {}", mp, err),
+                                });
+                            }
                         }
                     }
 
@@ -259,32 +314,9 @@ fn run_pipeline(
                                     message: format!("Creating native MBR partition on PhysicalDrive{} (100% capacity)...", disk_num),
                                 });
 
-                                let is_fat32 = matches!(file_system, usb_x_core::types::FileSystem::Fat32);
-                                let part_res = usb_x_platform::create_mbr_partition_on_disk(disk_num, device.size_bytes, is_fat32);
+                                let _ = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, is_fat32);
 
-                                match part_res {
-                                    Ok(_) => {
-                                        let _ = sender.send(OperationEvent::Log {
-                                            level: LogLevel::Info,
-                                            timestamp: "Now".to_string(),
-                                            message: "Native MBR partition table written to Sector 0 with zero unallocated space.".to_string(),
-                                        });
-                                    }
-                                    Err(err) => {
-                                        let _ = sender.send(OperationEvent::Log {
-                                            level: LogLevel::Warn,
-                                            timestamp: "Now".to_string(),
-                                            message: format!("Partition notice: {}", err),
-                                        });
-                                    }
-                                }
-
-                                std::thread::sleep(std::time::Duration::from_millis(600));
-
-                                // Find the newly mounted volume on this disk
-                                let vols = usb_x_platform::get_volumes_for_disk(disk_num);
-                                if let Some(v) = vols.first() {
-                                    let cand = format!("{}:\\", v.drive_letter);
+                                if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
                                     let _ = sender.send(OperationEvent::StageChanged {
                                         stage: OperationStage::Formatting,
                                         message: format!("Formatting partition {} as {} ({}) via native Win32 FormatEx...", cand, fs_str, vol_label),
@@ -530,25 +562,79 @@ fn run_pipeline(
                 stage: OperationStage::Partitioning,
                 message: format!("Preparing {} partition structure...", partition_scheme.label()),
             });
-            let _ = sender.send(OperationEvent::StageChanged {
-                stage: OperationStage::Formatting,
-                message: format!("Formatting volume '{}' as {}...", volume_label, file_system.label()),
-            });
+
+            #[cfg(windows)]
+            let disk_num_opt: Option<u32> = device.id.as_str()
+                .strip_prefix("PhysicalDrive")
+                .and_then(|s| s.parse::<u32>().ok());
+
+            #[allow(unused_mut)]
+            let mut has_multiple_partitions = device.partitions.len() > 1;
+
+            #[cfg(windows)]
+            if let Some(disk_num) = disk_num_opt {
+                if disk_num != 0 {
+                    let vols = usb_x_platform::get_volumes_for_disk(disk_num);
+                    if vols.len() > 1 {
+                        has_multiple_partitions = true;
+                    }
+                }
+            }
+
+            let fs_str = file_system.as_str();
+            let is_fat32 = matches!(file_system, usb_x_core::types::FileSystem::Fat32);
+            let bytes_cs = cluster_size.to_bytes();
 
             #[cfg(windows)]
             {
-                if let Some(first_part) = device.partitions.first() {
-                    if let Some(ref mp) = first_part.mount_point {
-                        let fs_str = file_system.as_str();
+                if let Some(disk_num) = disk_num_opt {
+                    if has_multiple_partitions {
                         let _ = sender.send(OperationEvent::Log {
                             level: LogLevel::Info,
                             timestamp: "Now".to_string(),
-                            message: format!("Calling native Windows FormatEx on {} as {} with label '{}'...", mp, fs_str, volume_label),
+                            message: format!("Multiple partitions detected on PhysicalDrive{}. Deleting all partitions and recreating clean 100% capacity partition...", disk_num),
                         });
-                        let bytes_cs = cluster_size.to_bytes();
-                        let _ = usb_x_platform::format_drive_volume(mp, fs_str, volume_label, *quick_format, bytes_cs);
-                        usb_x_platform::notify_drive_ready(mp);
+                        let _ = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, is_fat32);
+                        if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
+                            let _ = sender.send(OperationEvent::StageChanged {
+                                stage: OperationStage::Formatting,
+                                message: format!("Formatting volume {} as {} ({}) via native Win32 FormatEx...", cand, fs_str, volume_label),
+                            });
+                            let _ = usb_x_platform::format_drive_volume(&cand, fs_str, volume_label, *quick_format, bytes_cs);
+                            usb_x_platform::notify_drive_ready(&cand);
+                        }
+                    } else if let Some(first_part) = device.partitions.first() {
+                        if let Some(ref mp) = first_part.mount_point {
+                            let _ = sender.send(OperationEvent::StageChanged {
+                                stage: OperationStage::Formatting,
+                                message: format!("Formatting volume {} as {} ({}) via native Win32 FormatEx...", mp, fs_str, volume_label),
+                            });
+                            let _ = usb_x_platform::format_drive_volume(mp, fs_str, volume_label, *quick_format, bytes_cs);
+                            usb_x_platform::notify_drive_ready(mp);
+                        }
                     }
+                }
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                let is_gpt = matches!(partition_scheme, usb_x_core::types::PartitionScheme::Gpt);
+                if has_multiple_partitions {
+                    let _ = sender.send(OperationEvent::Log {
+                        level: LogLevel::Info,
+                        timestamp: "Now".to_string(),
+                        message: format!("Multiple partitions detected on {}. Wiping and recreating single partition...", device.id),
+                    });
+                    if let Ok(part_dev) = usb_x_platform::linux::create_partition_on_disk(device.id.as_str(), is_gpt, is_fat32) {
+                        let _ = sender.send(OperationEvent::StageChanged {
+                            stage: OperationStage::Formatting,
+                            message: format!("Formatting partition {} as {} ({})...", part_dev, fs_str, volume_label),
+                        });
+                        let _ = usb_x_platform::linux::format_partition_volume(&part_dev, fs_str, volume_label);
+                    }
+                } else if let Some(first_part) = device.partitions.first() {
+                    let part_dev = format!("{}{}", device.id, first_part.number);
+                    let _ = usb_x_platform::linux::format_partition_volume(&part_dev, fs_str, volume_label);
                 }
             }
 

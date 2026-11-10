@@ -95,7 +95,7 @@ if __name__ == "__main__":
     control_file = os.path.join(dir_path, "deb/DEBIAN/control")
     desktop_file = os.path.join(dir_path, "pigeon.desktop")
     icon_file = os.path.join(root_dir, "assets/pigeon.png")
-    out_deb = os.path.join(dir_path, "pigeon_1.0.0_amd64.deb")
+    out_deb = os.path.join(dir_path, "pigeon_1.11.0_amd64.deb")
 
     with open(control_file, 'r', encoding='utf-8') as f:
         control_text = f.read()

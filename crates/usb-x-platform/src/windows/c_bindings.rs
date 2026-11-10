@@ -47,6 +47,12 @@ extern "C" {
         is_fat32: c_int,
     ) -> c_int;
 
+    pub fn c_clean_and_repartition_disk(
+        disk_number: c_uint,
+        total_size_bytes: c_ulonglong,
+        is_fat32: c_int,
+    ) -> c_int;
+
     pub fn c_mount_iso_virtdisk(
         iso_path: *const u16,
         out_vdisk_handle: *mut *mut c_void,

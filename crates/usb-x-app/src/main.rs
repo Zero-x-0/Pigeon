@@ -24,7 +24,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([475.0, 595.0])
             .with_min_inner_size([440.0, 520.0])
-            .with_title("Pigeon 1.0")
+            .with_title("Pigeon 1.11")
             .with_icon(icon::get_app_icon())
             .with_resizable(true),
         ..Default::default()

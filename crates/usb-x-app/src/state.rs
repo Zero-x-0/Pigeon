@@ -75,6 +75,11 @@ pub struct AppState {
     pub file_browser_selected_file: Option<std::path::PathBuf>,
     pub file_browser_error: Option<String>,
     pub file_browser_filter_all: bool,
+    pub file_browser_path_input: String,
+    pub file_browser_editing_path: bool,
+    pub file_browser_search: String,
+    pub file_browser_history: Vec<std::path::PathBuf>,
+    pub file_browser_history_idx: usize,
 
     pub calculated_checksums: Option<ImageChecksums>,
     pub is_calculating_hash: bool,
@@ -172,6 +177,11 @@ impl AppState {
             file_browser_selected_file: None,
             file_browser_error: None,
             file_browser_filter_all: false,
+            file_browser_path_input: String::new(),
+            file_browser_editing_path: false,
+            file_browser_search: String::new(),
+            file_browser_history: Vec::new(),
+            file_browser_history_idx: 0,
 
             calculated_checksums: None,
             is_calculating_hash: false,
@@ -602,16 +612,92 @@ impl AppState {
         self.start_hash_calculation();
     }
 
+    pub fn trigger_file_dialog(&mut self) {
+        match usb_x_platform::open_file_dialog_ex(
+            "Select Bootable ISO or Disk Image",
+            "Disk Images (*.iso;*.img;*.bin;*.vhd;*.raw)",
+            "*.iso;*.img;*.bin;*.vhd;*.raw",
+        ) {
+            usb_x_platform::DialogResult::Selected(path) => {
+                self.load_image_file(path);
+            }
+            usb_x_platform::DialogResult::Cancelled => {
+                // User intentionally cancelled native picker
+            }
+            usb_x_platform::DialogResult::Unsupported => {
+                // Native dialog not available on this desktop; open built-in free-window browser
+                self.open_file_browser();
+            }
+        }
+    }
+
+    pub fn set_file_browser_dir(&mut self, dir: std::path::PathBuf) {
+        if dir.is_dir() {
+            self.file_browser_current_dir = dir.clone();
+            self.file_browser_path_input = dir.to_string_lossy().to_string();
+            self.file_browser_selected_file = None;
+            self.file_browser_error = None;
+
+            if self.file_browser_history.is_empty() {
+                self.file_browser_history.push(dir);
+                self.file_browser_history_idx = 0;
+            } else if self.file_browser_history[self.file_browser_history_idx] != dir {
+                self.file_browser_history.truncate(self.file_browser_history_idx + 1);
+                self.file_browser_history.push(dir);
+                self.file_browser_history_idx = self.file_browser_history.len() - 1;
+            }
+        }
+    }
+
+    pub fn file_browser_can_go_back(&self) -> bool {
+        self.file_browser_history_idx > 0
+    }
+
+    pub fn file_browser_go_back(&mut self) {
+        if self.file_browser_can_go_back() {
+            self.file_browser_history_idx -= 1;
+            let dir = self.file_browser_history[self.file_browser_history_idx].clone();
+            self.file_browser_current_dir = dir.clone();
+            self.file_browser_path_input = dir.to_string_lossy().to_string();
+            self.file_browser_selected_file = None;
+            self.file_browser_error = None;
+        }
+    }
+
+    pub fn file_browser_can_go_forward(&self) -> bool {
+        self.file_browser_history_idx + 1 < self.file_browser_history.len()
+    }
+
+    pub fn file_browser_go_forward(&mut self) {
+        if self.file_browser_can_go_forward() {
+            self.file_browser_history_idx += 1;
+            let dir = self.file_browser_history[self.file_browser_history_idx].clone();
+            self.file_browser_current_dir = dir.clone();
+            self.file_browser_path_input = dir.to_string_lossy().to_string();
+            self.file_browser_selected_file = None;
+            self.file_browser_error = None;
+        }
+    }
+
+    pub fn file_browser_go_up(&mut self) {
+        if let Some(parent) = self.file_browser_current_dir.parent() {
+            let p = parent.to_path_buf();
+            self.set_file_browser_dir(p);
+        }
+    }
+
     pub fn open_file_browser(&mut self) {
         self.show_file_browser_dialog = true;
         self.file_browser_error = None;
         self.file_browser_selected_file = None;
+        self.file_browser_search.clear();
+        self.file_browser_editing_path = false;
 
         if !self.image_path.is_empty() {
             let p = std::path::Path::new(&self.image_path);
             if let Some(parent) = p.parent() {
                 if parent.is_dir() {
-                    self.file_browser_current_dir = parent.to_path_buf();
+                    self.set_file_browser_dir(parent.to_path_buf());
                     return;
                 }
             }
@@ -620,27 +706,43 @@ impl AppState {
         #[cfg(windows)]
         let home = std::env::var("USERPROFILE").ok();
         #[cfg(not(windows))]
-        let home = std::env::var("HOME").ok();
+        let home = {
+            if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+                if !sudo_user.is_empty() && sudo_user != "root" {
+                    let user_home = std::path::PathBuf::from(format!("/home/{}", sudo_user));
+                    if user_home.is_dir() {
+                        Some(user_home.to_string_lossy().to_string())
+                    } else {
+                        std::env::var("HOME").ok()
+                    }
+                } else {
+                    std::env::var("HOME").ok()
+                }
+            } else {
+                std::env::var("HOME").ok()
+            }
+        };
 
         if let Some(ref h) = home {
             let downloads = std::path::Path::new(h).join("Downloads");
             if downloads.is_dir() {
-                self.file_browser_current_dir = downloads;
+                self.set_file_browser_dir(downloads);
                 return;
             }
             let desktop = std::path::Path::new(h).join("Desktop");
             if desktop.is_dir() {
-                self.file_browser_current_dir = desktop;
+                self.set_file_browser_dir(desktop);
                 return;
             }
             let home_path = std::path::Path::new(h);
             if home_path.is_dir() {
-                self.file_browser_current_dir = home_path.to_path_buf();
+                self.set_file_browser_dir(home_path.to_path_buf());
                 return;
             }
         }
 
-        self.file_browser_current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let cur = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        self.set_file_browser_dir(cur);
     }
 }
 

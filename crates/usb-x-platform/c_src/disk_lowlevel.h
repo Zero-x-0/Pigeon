@@ -38,8 +38,14 @@ int c_format_volume_fmifs(
     CFormatCallback callback
 );
 
-// 6. Direct MBR Partition Creation
+// 6. Direct MBR Partition Creation & Deep Partition Cleaner
 int c_create_mbr_partition(
+    unsigned int disk_number,
+    unsigned long long total_size_bytes,
+    int is_fat32
+);
+
+int c_clean_and_repartition_disk(
     unsigned int disk_number,
     unsigned long long total_size_bytes,
     int is_fat32

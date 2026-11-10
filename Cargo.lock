@@ -1752,7 +1752,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pigeon"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "arboard",
  "eframe",
@@ -2445,18 +2445,18 @@ dependencies = [
 
 [[package]]
 name = "usb-x-catalog"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "usb-x-core",
 ]
 
 [[package]]
 name = "usb-x-core"
-version = "1.0.0"
+version = "1.11.0"
 
 [[package]]
 name = "usb-x-engine"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "usb-x-core",
  "usb-x-image",
@@ -2465,14 +2465,14 @@ dependencies = [
 
 [[package]]
 name = "usb-x-image"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "usb-x-core",
 ]
 
 [[package]]
 name = "usb-x-platform"
-version = "1.0.0"
+version = "1.11.0"
 dependencies = [
  "cc",
  "libc",

@@ -13,13 +13,14 @@ pub mod macos;
 
 pub use traits::StorageBackend;
 pub use virtual_drive::VirtualDriveBackend;
-pub use file_dialog::{has_native_file_dialog, open_file_dialog, save_file_dialog};
+pub use file_dialog::{has_native_file_dialog, open_file_dialog, open_file_dialog_ex, save_file_dialog, DialogResult};
 
 #[cfg(windows)]
 pub use windows::disk_io::{
-    create_mbr_partition_on_disk, format_drive_volume, get_volumes_for_disk, get_windows_accent_color,
-    get_windows_version_string, is_elevated_admin, is_system_dark_mode, mount_iso_virtdisk,
-    notify_drive_ready, relaunch_as_admin, VirtualIsoMount, VolumeInfo,
+    clean_and_repartition_disk, create_mbr_partition_on_disk, format_drive_volume,
+    get_volumes_for_disk, get_windows_accent_color, get_windows_version_string,
+    is_elevated_admin, is_system_dark_mode, mount_iso_virtdisk, notify_drive_ready,
+    relaunch_as_admin, wait_for_volume_ready, VirtualIsoMount, VolumeInfo,
 };
 #[cfg(windows)]
 pub use windows::c_bindings;

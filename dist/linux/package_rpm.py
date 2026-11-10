@@ -75,7 +75,7 @@ def create_cpio_entry(filename, data, mode=0o100755):
 def build_rpm(output_path, bin_path, desktop_path, icon_path):
     with open(output_path, 'wb') as f:
         # 1. Lead (96 bytes)
-        name = "pigeon-1.0.0-1".encode('ascii')[:65].ljust(66, b'\x00')
+        name = "pigeon-1.11.0-1".encode('ascii')[:65].ljust(66, b'\x00')
         lead = RPM_MAGIC + struct.pack(">BBhh66shh16s", 3, 0, 0, 1, name, 1, 5, b"\x00" * 16)
         f.write(lead)
 
@@ -110,7 +110,7 @@ def build_rpm(output_path, bin_path, desktop_path, icon_path):
         f.write(HEADER_MAGIC[:4])
         tags = [
             (RPMTAG_NAME, TYPE_STRING, b"pigeon\x00"),
-            (RPMTAG_VERSION, TYPE_STRING, b"1.0.0\x00"),
+            (RPMTAG_VERSION, TYPE_STRING, b"1.11.0\x00"),
             (RPMTAG_RELEASE, TYPE_STRING, b"1\x00"),
             (RPMTAG_SUMMARY, TYPE_STRING, b"Next-Generation bootable USB creator\x00"),
             (RPMTAG_DESCRIPTION, TYPE_STRING, b"Fast and reliable bootable USB creator\x00"),
@@ -139,7 +139,7 @@ if __name__ == "__main__":
     root_dir = os.path.abspath(os.path.join(dir_path, "../.."))
     desktop_file = os.path.join(dir_path, "pigeon.desktop")
     icon_file = os.path.join(root_dir, "assets/pigeon.png")
-    out_rpm = os.path.join(dir_path, "pigeon-1.0.0-1.x86_64.rpm")
+    out_rpm = os.path.join(dir_path, "pigeon-1.11.0-1.x86_64.rpm")
 
     candidate_bins = [
         os.path.join(root_dir, "target/linux/release/pigeon"),

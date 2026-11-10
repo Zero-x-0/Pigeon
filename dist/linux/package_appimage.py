@@ -110,7 +110,7 @@ if __name__ == "__main__":
     desktop_file = os.path.join(dir_path, "pigeon.desktop")
     apprun_file = os.path.join(dir_path, "appimage/AppRun")
     icon_file = os.path.join(root_dir, "assets/pigeon.png")
-    out_appimage = os.path.join(dir_path, "Pigeon-1.0.0-x86_64.AppImage")
+    out_appimage = os.path.join(dir_path, "Pigeon-1.11.0-x86_64.AppImage")
 
     candidate_bins = [
         os.path.join(root_dir, "target/linux/release/pigeon"),

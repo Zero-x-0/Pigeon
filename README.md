@@ -1,173 +1,98 @@
 <div align="center">
 
-<img src="assets/pigeon.png" alt="Pigeon Logo" width="190"/>
+<img src="assets/pigeon.png" alt="Pigeon Logo" width="180"/>
 
 # 🐦 Pigeon
 
 **Next-Generation Bootable USB Creator & Disk Imaging Utility**  
-**Version 1.0 (Production Release)**
+**Version 1.11 (Production Release)**
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Rust: 2021](https://img.shields.io/badge/Rust-2021_Edition-orange.svg)](https://www.rust-lang.org)
-[![Version: 1.0](https://img.shields.io/badge/Release-v1.0-brightgreen.svg)](release/)
-[![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)](release/)
-[![Architecture: x86_64](https://img.shields.io/badge/Architecture-x86__64-brightgreen.svg)](release/)
+[![Release: v1.11](https://img.shields.io/badge/Release-v1.11-brightgreen.svg)](https://github.com/Zero-x-0/Pigeon/releases/latest)
+[![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/Zero-x-0/Pigeon/releases/latest)
 
-A blazingly fast, memory-safe, portable desktop application for creating bootable media, flashing raw disk images, verifying flash drive integrity, and customizing OS installations. Engineered in pure Rust with direct hardware-aligned sector streaming.
+A blazingly fast, lightweight, and memory-safe desktop tool for flashing bootable media, creating raw disk images, bypassing Windows 11 restrictions, and checking drive health. Built in pure Rust with direct sector streaming.
 
-[Releases & Downloads](#-downloads--releases-v10) • [Key Features](#-key-features) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [Building](#-building-from-source)
+[Downloads](#-downloads) • [Features](#-features) • [Quick Start](#-quick-start) • [Build from Source](#-build-from-source)
 
 </div>
 
 ---
 
-## 📦 Downloads & Releases (v1.0)
+## 📦 Downloads
 
-All official version 1.0 release executables and distribution packages are available directly in the [`release/`](release/) folder:
+Pre-compiled production binaries for all platforms are available on the **[GitHub Releases Page](https://github.com/Zero-x-0/Pigeon/releases/latest)**:
 
-| Platform / Distro | Package Format | Direct Download Link | Description |
+| Platform / Distro | Package Format | Direct Download | Description |
 | :--- | :--- | :--- | :--- |
-| **Windows 10 / 11** | **Standalone `.exe`** | [**`pigeon-1.0.0-windows-x64.exe`**](release/pigeon-1.0.0-windows-x64.exe) | Single portable executable (No installer needed) |
-| **Linux (Universal)** | **Portable `.AppImage`** | [**`Pigeon-1.0.0-x86_64.AppImage`**](release/Pigeon-1.0.0-x86_64.AppImage) | Runs on any modern x86_64 Linux distribution |
-| **Debian / Ubuntu / Kali** | **Debian Package `.deb`** | [**`pigeon_1.0.0_amd64.deb`**](release/pigeon_1.0.0_amd64.deb) | Native package with app launcher & desktop icon |
-| **Fedora / RHEL / SUSE** | **RPM Package `.rpm`** | [**`pigeon-1.0.0-1.x86_64.rpm`**](release/pigeon-1.0.0-1.x86_64.rpm) | Native package for Red Hat, Fedora & openSUSE |
+| **Windows 10 / 11** | **Portable `.exe`** | [**`pigeon-1.11.0-windows-x64.exe`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Standalone portable executable (No install required) |
+| **Linux (Universal)** | **AppImage** | [**`Pigeon-1.11.0-x86_64.AppImage`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Single portable executable for all modern Linux distros |
+| **Debian / Ubuntu / Kali** | **`.deb` package** | [**`pigeon_1.11.0_amd64.deb`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Native package with desktop launcher & icon |
+| **Fedora / RHEL / openSUSE** | **`.rpm` package** | [**`pigeon-1.11.0-1.x86_64.rpm`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Native RPM package |
 
 ---
 
-## 🌟 Key Features
+## 🌟 Features
 
-### ⚡ Blazing Fast & Memory Safe
-- **Pure Rust Engine:** Buffered, sector-aligned raw block streaming with zero memory garbage collection.
-- **Ultra-Lightweight:** 100% self-contained binaries without electron, webview, or bulky runtime dependencies.
-
-### 🪟 Windows 11 Setup Customizer (Bypass OOBE)
-- **Automatic Tweaks Detection:** Activates automatically whenever a Windows 10 or Windows 11 installation ISO is selected.
-- **Hardware Requirement Bypasses:** Removes mandatory restrictions for TPM 2.0, Secure Boot, and 4 GB+ RAM.
-- **Offline Local Account:** Bypasses mandatory Microsoft online account sign-in (`BypassNRO`) and creates a local user account.
-- **Privacy & Encryption Protections:** Automatically disables telemetry / privacy question prompts and BitLocker automatic disk encryption.
-- **Non-Destructive XML Injection:** Generates clean, standard `autounattend.xml` placed directly at the filesystem root.
-
-### 🐧 Complete Linux & Windows Parity
-- **True Multi-Platform Support:** Works identically across Windows 10/11, Kali Linux (bare metal & VirtualBox), Ubuntu, Debian, Fedora, and openSUSE.
-- **Dual-Mode File Chooser:** Automatically detects and calls native desktop dialogs (`zenity`, `kdialog`, `yad`, Windows Explorer). If no system dialog exists (such as on minimal Kali Linux installations), Pigeon seamlessly opens its **built-in zero-dependency File Browser**.
-- **Native Drag & Drop:** Drag any `.iso`, `.img`, `.bin`, `.raw`, or `.vhd` disk image directly from your file manager (Thunar, Nautilus, Explorer) into Pigeon to load and probe it immediately.
-
-### 🛡️ Defensive Drive Safety Guard
-- **Physical Drive Isolation:** Strictly protects and hides host system disks (`PhysicalDrive0`, internal NVMe and SATA boot drives) to safeguard you against accidental data loss.
-- **Clean Volume Lock & Dismount:** Locks and unmounts partition volumes before formatting or streaming to ensure zero write contention.
-
-### 🔍 Real-Time Background Checksums
-- **Multi-Algorithm Hashing:** Calculates **MD5**, **SHA-256**, and high-speed hardware **CRC-32** in parallel background threads.
-- **Interactive Verification:** Paste an expected hash into the dialog to immediately verify cryptographic image integrity.
-
-### 🧪 Drive Health & Fake Flash Testing
-- **Bad Sector Verification:** Runs pattern-based read/write passes to detect physical drive defects.
-- **Counterfeit Drive Detection:** Exposes modified controller firmware and "fake capacity" USB drives before data corruption happens.
-
-### 🎨 Adaptive Modern UI
-- **Dynamic Theming:** Seamlessly synchronizes with system Dark and Light appearance preferences.
-- **OS Accent Harmonization:** Adopts native desktop accent highlights across Windows and Linux.
+* **High Performance & Safe:** Direct sector streaming in pure Rust with zero garbage collection and strictly protected host system disks.
+* **Windows 11 Customizer (OOBE Bypass):** Automatically removes restrictions for TPM 2.0, Secure Boot, and 4 GB+ RAM, bypasses mandatory online accounts (`BypassNRO`), and disables telemetry.
+* **Desktop File Manager Integration:** Native integration with **Thunar** (XFCE / Kali Linux), **Dolphin** (KDE Plasma), **Nautilus** (GNOME / Ubuntu), and **Nemo** (Cinnamon / Mint).
+* **Free-Floating Built-In File Manager:** When native dialogs are unavailable, Pigeon opens an independent, movable, and resizable desktop window with interactive breadcrumbs, direct path input, real-time search, and quick access to system drives.
+* **Multi-Partition Auto-Cleaner:** Automatically cleans and repartitions USB drives with multiple existing partitions before writing to prevent boot corruption.
+* **Background Checksums:** Computes **SHA-256**, **MD5**, and high-speed **CRC-32** hashes concurrently with instant matching against expected values.
+* **Drive Health & Fake Flash Testing:** Non-destructive and pattern-based verification passes to detect bad blocks and counterfeit capacity drives.
+* **Drag & Drop:** Drop any `.iso`, `.img`, `.bin`, `.raw`, or `.vhd` directly onto the window.
+* **Adaptive Dark/Light Theme:** Matches OS appearance and system accent color on Windows and Linux.
 
 ---
 
 ## 🚀 Quick Start
 
-### Running on Linux
+### Linux
 
-#### Universal AppImage (Recommended)
 ```bash
-chmod +x release/Pigeon-1.0.0-x86_64.AppImage
-./release/Pigeon-1.0.0-x86_64.AppImage
+# Run standalone AppImage:
+chmod +x Pigeon-1.11.0-x86_64.AppImage
+sudo ./Pigeon-1.11.0-x86_64.AppImage
+
+# Or install .deb on Kali / Debian / Ubuntu:
+sudo dpkg -i pigeon_1.11.0_amd64.deb
+sudo pigeon
+
+# Or install .rpm on Fedora / RHEL:
+sudo rpm -i pigeon-1.11.0-1.x86_64.rpm
+sudo pigeon
 ```
 
-#### Debian / Kali Linux / Ubuntu
-```bash
-sudo apt install ./release/pigeon_1.0.0_amd64.deb
-pigeon
-```
+### Windows
 
-#### Fedora / RHEL / openSUSE
-```bash
-sudo rpm -i ./release/pigeon-1.0.0-1.x86_64.rpm
-pigeon
-```
-
-### Running on Windows
-
-Double-click `pigeon-1.0.0-windows-x64.exe` or execute from Command Prompt / PowerShell:
+Download `pigeon-1.11.0-windows-x64.exe` from [Releases](https://github.com/Zero-x-0/Pigeon/releases/latest) and double-click or run from PowerShell:
 ```powershell
-.\release\pigeon-1.0.0-windows-x64.exe
+.\pigeon-1.11.0-windows-x64.exe
 ```
-*(Automatically prompts for Administrator permissions to access raw physical storage drives)*
+*(Prompts for Administrator privileges required for physical disk streaming)*
 
 ---
 
-## 🏗️ Architecture
+## 🛠️ Build from Source
 
-Pigeon is structured as a modular workspace consisting of 6 decoupled Rust crates:
-
-```
-pigeon/
-├── assets/               # High-resolution logos, brand artwork & icons
-├── crates/
-│   ├── usb-x-core/       # Domain models, partition schemes, risk classification & validation
-│   ├── usb-x-image/      # ISO9660, UDF, El Torito, WIM inspection, autounattend generator, hashing
-│   ├── usb-x-platform/   # OS storage backends (Win32 IOCTL / Linux sysfs/lsblk), UAC elevation, dialogs
-│   ├── usb-x-engine/     # Execution pipeline, sector streaming, verification & progress events
-│   ├── usb-x-catalog/    # OS download catalog metadata (Windows, Ubuntu, Arch, Fedora)
-│   └── usb-x-app/        # Egui/Eframe desktop interface, dynamic themes, Pigeon icon & dialogs
-├── dist/
-│   └── linux/            # Linux packaging pipelines (AppImage, DEB, RPM specifications)
-├── docs/                 # Architectural specifications, security models, and test plans
-└── release/              # Ready-to-use production binaries for Windows and Linux
-```
-
----
-
-## 🛠️ Building From Source
-
-### Prerequisites
-- [Rust toolchain](https://rustup.rs/) (1.75+ recommended)
-- **Windows:** MSVC or MinGW GCC
-- **Linux:** `build-essential`, `pkg-config`, `libx11-dev`, `libwayland-dev`, `libgl1-mesa-dev`, `python3`
-
-### Compile for Your Platform
 ```bash
 # Clone the repository
-git clone https://github.com/pigeon-usb/pigeon.git
-cd pigeon
+git clone https://github.com/Zero-x-0/Pigeon.git
+cd Pigeon
 
-# Run the complete test suite
+# Run tests
 cargo test --workspace
 
-# Build the release executable
+# Build optimized binary
 cargo build --release -p pigeon
 ```
 
-Compiled binaries will be generated at:
-- **Windows:** `target/release/pigeon.exe`
-- **Linux:** `target/release/pigeon`
-
-### Generate All Linux Release Packages (.AppImage, .deb, .rpm)
+To build all Linux release packages (`.deb`, `.rpm`, `.AppImage`):
 ```bash
-# Build the native Linux ELF binary
-cargo build --release -p pigeon
-
-# Package all formats
-python3 dist/linux/package_deb.py
-python3 dist/linux/package_rpm.py
-python3 dist/linux/package_appimage.py
+bash dist/linux/build-all-linux.sh
 ```
-
-Generated packages are placed in `dist/linux/` and `release/`.
-
----
-
-## 🔒 Security & Data Safety
-
-- **Destructive Operations:** Writing or formatting drives permanently erases existing target media data.
-- **Automatic System Disk Protection:** Internal operating system boot disks (`PhysicalDrive0`, `/dev/sda` when root mounted, NVMe system partitions) are locked and cannot be selected.
-- **Explicit Confirmation:** Non-reversible actions prompt a clear confirmation dialog prior to initializing partition destruction.
 
 ---
 

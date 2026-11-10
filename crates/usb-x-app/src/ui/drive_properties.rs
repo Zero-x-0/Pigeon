@@ -121,17 +121,7 @@ pub fn render_drive_properties(ui: &mut Ui, state: &mut AppState) {
         let select_btn = egui::Button::new(RichText::new("SELECT").strong().size(11.5).color(btn_text_clr))
             .min_size(Vec2::new(76.0, 22.0));
         if ui.add_enabled(!state.is_running, select_btn).clicked() {
-            if usb_x_platform::has_native_file_dialog() {
-                if let Some(chosen) = usb_x_platform::open_file_dialog(
-                    "Select Bootable ISO or Disk Image",
-                    "Disk Images (*.iso;*.img;*.bin;*.vhd;*.raw)",
-                    "*.iso;*.img;*.bin;*.vhd;*.raw",
-                ) {
-                    state.load_image_file(chosen);
-                }
-            } else {
-                state.open_file_browser();
-            }
+            state.trigger_file_dialog();
         }
     });
 

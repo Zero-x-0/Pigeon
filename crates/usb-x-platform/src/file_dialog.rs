@@ -38,6 +38,106 @@ extern "system" {
     fn GetSaveFileNameW(lpofn: *mut OpenFileNameW) -> i32;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogResult {
+    Selected(String),
+    Cancelled,
+    Unsupported,
+}
+
+#[cfg(not(windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxDesktopEnv {
+    KdeDolphin,
+    XfceThunar,
+    GnomeNautilus,
+    CinnamonNemo,
+    Generic,
+}
+
+#[cfg(not(windows))]
+fn is_command_available(cmd: &str) -> bool {
+    // 1. Check directories in PATH
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            if !dir.is_empty() {
+                let p = std::path::Path::new(dir).join(cmd);
+                if p.is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    // 2. Check standard system locations directly
+    for dir in &["/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"] {
+        if std::path::Path::new(dir).join(cmd).is_file() {
+            return true;
+        }
+    }
+    // 3. Fallback: try executing --version
+    if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
+        return output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty();
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn configure_cmd_env(cmd: &mut std::process::Command) {
+    if std::env::var("DISPLAY").is_err() {
+        cmd.env("DISPLAY", ":0");
+    }
+
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if !sudo_user.is_empty() && sudo_user != "root" {
+            let user_home = format!("/home/{}", sudo_user);
+
+            if std::env::var("XAUTHORITY").is_err() {
+                let xauth_path = format!("{}/.Xauthority", user_home);
+                if std::path::Path::new(&xauth_path).is_file() {
+                    cmd.env("XAUTHORITY", xauth_path);
+                }
+            }
+
+            if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_err() {
+                if let Ok(output) = std::process::Command::new("id").arg("-u").arg(&sudo_user).output() {
+                    let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let bus_path = format!("/run/user/{}/bus", uid);
+                    if std::path::Path::new(&bus_path).exists() {
+                        cmd.env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", bus_path));
+                    }
+                }
+            }
+
+            cmd.env("HOME", &user_home);
+            cmd.env("USER", &sudo_user);
+            cmd.env("LOGNAME", &sudo_user);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_desktop_env() -> LinuxDesktopEnv {
+    let xdg_current = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_uppercase();
+    let desktop_session = std::env::var("DESKTOP_SESSION").unwrap_or_default().to_uppercase();
+
+    let has_dolphin = is_command_available("dolphin");
+    let has_thunar = is_command_available("thunar");
+    let has_nautilus = is_command_available("nautilus");
+    let has_nemo = is_command_available("nemo");
+
+    if xdg_current.contains("KDE") || desktop_session.contains("KDE") || desktop_session.contains("PLASMA") || has_dolphin {
+        LinuxDesktopEnv::KdeDolphin
+    } else if xdg_current.contains("XFCE") || desktop_session.contains("XFCE") || has_thunar {
+        LinuxDesktopEnv::XfceThunar
+    } else if xdg_current.contains("GNOME") || desktop_session.contains("GNOME") || desktop_session.contains("UBUNTU") || has_nautilus {
+        LinuxDesktopEnv::GnomeNautilus
+    } else if xdg_current.contains("CINNAMON") || desktop_session.contains("CINNAMON") || has_nemo {
+        LinuxDesktopEnv::CinnamonNemo
+    } else {
+        LinuxDesktopEnv::Generic
+    }
+}
+
 pub fn has_native_file_dialog() -> bool {
     #[cfg(windows)]
     {
@@ -45,18 +145,26 @@ pub fn has_native_file_dialog() -> bool {
     }
     #[cfg(not(windows))]
     {
-        for binary in &["zenity", "yad", "kdialog"] {
-            if let Ok(output) = std::process::Command::new(binary).arg("--version").output() {
-                if output.status.success() {
-                    return true;
-                }
+        for binary in &["zenity", "yad", "kdialog", "qarma"] {
+            if is_command_available(binary) {
+                return true;
             }
+        }
+        if is_command_available("python3") {
+            return true;
         }
         false
     }
 }
 
 pub fn open_file_dialog(title: &str, filter_desc: &str, filter_ext: &str) -> Option<String> {
+    match open_file_dialog_ex(title, filter_desc, filter_ext) {
+        DialogResult::Selected(path) => Some(path),
+        _ => None,
+    }
+}
+
+pub fn open_file_dialog_ex(title: &str, filter_desc: &str, filter_ext: &str) -> DialogResult {
     #[cfg(windows)]
     {
         let mut filter_utf16: Vec<u16> = Vec::new();
@@ -85,106 +193,391 @@ pub fn open_file_dialog(title: &str, filter_desc: &str, filter_ext: &str) -> Opt
         let ret = unsafe { GetOpenFileNameW(&mut ofn) };
         if ret != 0 {
             let len = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
-            Some(String::from_utf16_lossy(&file_buf[..len]))
+            DialogResult::Selected(String::from_utf16_lossy(&file_buf[..len]))
         } else {
-            None
+            DialogResult::Cancelled
         }
     }
     #[cfg(not(windows))]
     {
         let (clean_desc, patterns) = parse_linux_filter(filter_desc, filter_ext);
-
-        // 1. Try zenity first (standard on GNOME, XFCE, Kali, Debian, Ubuntu)
-        let mut cmd = std::process::Command::new("zenity");
-        cmd.arg("--file-selection").arg(format!("--title={}", title));
-        if !patterns.is_empty() {
-            cmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
-            cmd.arg("--file-filter=All Files | *");
-        }
-        match cmd.output() {
-            Ok(output) if output.status.success() => {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                if !err.trim().is_empty() {
-                    let mut retry_cmd = std::process::Command::new("zenity");
-                    retry_cmd.arg("--file-selection").arg(format!("--title={}", title));
-                    if let Ok(retry_output) = retry_cmd.output() {
-                        if retry_output.status.success() {
-                            let path = String::from_utf8_lossy(&retry_output.stdout).trim().to_string();
-                            if !path.is_empty() {
-                                return Some(path);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        // 2. Try yad (Yet Another Dialog, popular on Kali Linux & Debian lightweight)
-        let mut ycmd = std::process::Command::new("yad");
-        ycmd.arg("--file-selection").arg(format!("--title={}", title));
-        if !patterns.is_empty() {
-            ycmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
-            ycmd.arg("--file-filter=All Files | *");
-        }
-        if let Ok(output) = ycmd.output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
-        }
-
-        // 3. Try kdialog (standard on KDE Plasma)
-        let mut kcmd = std::process::Command::new("kdialog");
         let kde_filter = if !patterns.is_empty() {
             format!("{}|{}\n*|All Files", patterns, clean_desc)
         } else {
             "*".to_string()
         };
-        kcmd.arg("--getopenfilename").arg(".").arg(kde_filter).arg("--title").arg(title);
-        if let Ok(output) = kcmd.output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
+
+        let env = detect_desktop_env();
+
+        type DialogRunner = Box<dyn Fn() -> DialogResult>;
+        let runners: Vec<DialogRunner> = match env {
+            LinuxDesktopEnv::KdeDolphin => vec![
+                Box::new({
+                    let t = title.to_string();
+                    let kf = kde_filter.clone();
+                    move || run_kdialog_open(&t, &kf)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let kf = kde_filter.clone();
+                    move || run_python_qt_open(&t, &kf)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_zenity_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_yad_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_python_gtk_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    move || run_python_tkinter_open(&t)
+                }),
+            ],
+            LinuxDesktopEnv::XfceThunar | LinuxDesktopEnv::GnomeNautilus | LinuxDesktopEnv::CinnamonNemo => vec![
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_zenity_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_yad_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_python_gtk_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let kf = kde_filter.clone();
+                    move || run_kdialog_open(&t, &kf)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let kf = kde_filter.clone();
+                    move || run_python_qt_open(&t, &kf)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    move || run_python_tkinter_open(&t)
+                }),
+            ],
+            LinuxDesktopEnv::Generic => vec![
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_zenity_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_yad_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let cd = clean_desc.clone();
+                    let pt = patterns.clone();
+                    move || run_python_gtk_open(&t, &cd, &pt)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let kf = kde_filter.clone();
+                    move || run_kdialog_open(&t, &kf)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    let kf = kde_filter.clone();
+                    move || run_python_qt_open(&t, &kf)
+                }),
+                Box::new({
+                    let t = title.to_string();
+                    move || run_python_tkinter_open(&t)
+                }),
+            ],
+        };
+
+        for runner in runners {
+            let res = runner();
+            match res {
+                DialogResult::Selected(path) => return DialogResult::Selected(path),
+                DialogResult::Cancelled => return DialogResult::Cancelled,
+                DialogResult::Unsupported => continue,
             }
         }
 
-        // 4. Try Python 3 Tkinter fallback
-        let py_script = format!(
-            "import sys\n\
-             try:\n\
-                 import tkinter as tk\n\
-                 from tkinter import filedialog\n\
-                 root = tk.Tk()\n\
-                 root.withdraw()\n\
-                 res = filedialog.askopenfilename(title={:?})\n\
-                 if res: sys.stdout.write(res)\n\
-             except Exception:\n\
-                 pass",
-            title
-        );
-        let mut py_cmd = std::process::Command::new("python3");
-        py_cmd.arg("-c").arg(&py_script);
-        if let Ok(output) = py_cmd.output() {
+        DialogResult::Unsupported
+    }
+}
+
+#[cfg(not(windows))]
+fn run_zenity_open(title: &str, clean_desc: &str, patterns: &str) -> DialogResult {
+    if !is_command_available("zenity") {
+        return DialogResult::Unsupported;
+    }
+    let mut cmd = std::process::Command::new("zenity");
+    configure_cmd_env(&mut cmd);
+    cmd.arg("--file-selection").arg(format!("--title={}", title));
+    if !patterns.is_empty() {
+        cmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
+        cmd.arg("--file-filter=All Files | *");
+    }
+    match cmd.output() {
+        Ok(output) => {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
-                    return Some(path);
+                    DialogResult::Selected(path)
+                } else {
+                    DialogResult::Cancelled
                 }
+            } else if output.status.code() == Some(1) {
+                DialogResult::Cancelled
+            } else {
+                DialogResult::Unsupported
             }
         }
+        Err(_) => DialogResult::Unsupported,
+    }
+}
 
-        None
+#[cfg(not(windows))]
+fn run_yad_open(title: &str, clean_desc: &str, patterns: &str) -> DialogResult {
+    if !is_command_available("yad") {
+        return DialogResult::Unsupported;
+    }
+    let mut cmd = std::process::Command::new("yad");
+    configure_cmd_env(&mut cmd);
+    cmd.arg("--file-selection").arg(format!("--title={}", title));
+    if !patterns.is_empty() {
+        cmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
+        cmd.arg("--file-filter=All Files | *");
+    }
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    DialogResult::Selected(path)
+                } else {
+                    DialogResult::Cancelled
+                }
+            } else if output.status.code() == Some(1) {
+                DialogResult::Cancelled
+            } else {
+                DialogResult::Unsupported
+            }
+        }
+        Err(_) => DialogResult::Unsupported,
+    }
+}
+
+#[cfg(not(windows))]
+fn run_kdialog_open(title: &str, kde_filter: &str) -> DialogResult {
+    if !is_command_available("kdialog") {
+        return DialogResult::Unsupported;
+    }
+    let mut cmd = std::process::Command::new("kdialog");
+    configure_cmd_env(&mut cmd);
+    cmd.arg("--getopenfilename").arg(".").arg(kde_filter).arg("--title").arg(title);
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    DialogResult::Selected(path)
+                } else {
+                    DialogResult::Cancelled
+                }
+            } else if output.status.code() == Some(1) {
+                DialogResult::Cancelled
+            } else {
+                DialogResult::Unsupported
+            }
+        }
+        Err(_) => DialogResult::Unsupported,
+    }
+}
+
+#[cfg(not(windows))]
+fn run_python_gtk_open(title: &str, clean_desc: &str, patterns: &str) -> DialogResult {
+    if !is_command_available("python3") {
+        return DialogResult::Unsupported;
+    }
+    let script = format!(
+        r#"import sys
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk
+    dialog = Gtk.FileChooserDialog(
+        title={title:?},
+        action=Gtk.FileChooserAction.OPEN
+    )
+    dialog.add_buttons(
+        "_Cancel", Gtk.ResponseType.CANCEL,
+        "_Open", Gtk.ResponseType.ACCEPT
+    )
+    dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+    dialog.set_select_multiple(False)
+    
+    f1 = Gtk.FileFilter()
+    f1.set_name({clean_desc:?})
+    for pat in {patterns:?}.split():
+        if pat:
+            f1.add_pattern(pat)
+    dialog.add_filter(f1)
+
+    f2 = Gtk.FileFilter()
+    f2.set_name("All Files (*.*)")
+    f2.add_pattern("*")
+    dialog.add_filter(f2)
+
+    resp = dialog.run()
+    if resp == Gtk.ResponseType.ACCEPT:
+        fn = dialog.get_filename()
+        if fn:
+            sys.stdout.write(fn)
+    dialog.destroy()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+    sys.exit(0)
+except Exception:
+    sys.exit(2)
+"#,
+        title = title,
+        clean_desc = clean_desc,
+        patterns = patterns
+    );
+
+    let mut cmd = std::process::Command::new("python3");
+    configure_cmd_env(&mut cmd);
+    cmd.arg("-c").arg(&script);
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    DialogResult::Selected(path)
+                } else {
+                    DialogResult::Cancelled
+                }
+            } else {
+                DialogResult::Unsupported
+            }
+        }
+        Err(_) => DialogResult::Unsupported,
+    }
+}
+
+#[cfg(not(windows))]
+fn run_python_qt_open(title: &str, kde_filter: &str) -> DialogResult {
+    if !is_command_available("python3") {
+        return DialogResult::Unsupported;
+    }
+    let script = format!(
+        r#"import sys
+def try_qt():
+    for mod in ['PyQt5', 'PyQt6', 'PySide2', 'PySide6']:
+        try:
+            widgets = __import__(mod + '.QtWidgets', fromlist=['QApplication', 'QFileDialog'])
+            QApp = getattr(widgets, 'QApplication')
+            QFD = getattr(widgets, 'QFileDialog')
+            app = QApp.instance() or QApp(sys.argv)
+            res = QFD.getOpenFileName(None, {title:?}, "", {kde_filter:?})
+            fn = res[0] if isinstance(res, tuple) else res
+            if fn:
+                sys.stdout.write(str(fn))
+            sys.exit(0)
+        except Exception:
+            continue
+    sys.exit(2)
+try_qt()
+"#,
+        title = title,
+        kde_filter = kde_filter
+    );
+
+    let mut cmd = std::process::Command::new("python3");
+    configure_cmd_env(&mut cmd);
+    cmd.arg("-c").arg(&script);
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    DialogResult::Selected(path)
+                } else {
+                    DialogResult::Cancelled
+                }
+            } else {
+                DialogResult::Unsupported
+            }
+        }
+        Err(_) => DialogResult::Unsupported,
+    }
+}
+
+#[cfg(not(windows))]
+fn run_python_tkinter_open(title: &str) -> DialogResult {
+    if !is_command_available("python3") {
+        return DialogResult::Unsupported;
+    }
+    let script = format!(
+        r#"import sys
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    res = filedialog.askopenfilename(title={title:?})
+    if res:
+        sys.stdout.write(res)
+    sys.exit(0)
+except Exception:
+    sys.exit(2)
+"#,
+        title = title
+    );
+
+    let mut cmd = std::process::Command::new("python3");
+    configure_cmd_env(&mut cmd);
+    cmd.arg("-c").arg(&script);
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    DialogResult::Selected(path)
+                } else {
+                    DialogResult::Cancelled
+                }
+            } else {
+                DialogResult::Unsupported
+            }
+        }
+        Err(_) => DialogResult::Unsupported,
     }
 }
 
@@ -236,25 +629,6 @@ pub fn parse_linux_filter(filter_desc: &str, filter_ext: &str) -> (String, Strin
     (clean_desc, pattern_str)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_linux_filter() {
-        let (desc, patterns) = parse_linux_filter(
-            "Disk Images (*.iso;*.img;*.bin;*.vhd;*.raw)",
-            "*.iso;*.img;*.bin;*.vhd;*.raw",
-        );
-        assert_eq!(desc, "Disk Images");
-        assert!(patterns.contains("*.iso"));
-        assert!(patterns.contains("*.ISO"));
-        assert!(patterns.contains("*.img"));
-        assert!(patterns.contains("*.IMG"));
-        assert!(!patterns.contains(';'));
-    }
-}
-
 pub fn save_file_dialog(title: &str, default_name: &str, filter_desc: &str, filter_ext: &str) -> Option<String> {
     #[cfg(windows)]
     {
@@ -296,103 +670,244 @@ pub fn save_file_dialog(title: &str, default_name: &str, filter_desc: &str, filt
     #[cfg(not(windows))]
     {
         let (clean_desc, patterns) = parse_linux_filter(filter_desc, filter_ext);
-
-        // 1. Try zenity
-        let mut cmd = std::process::Command::new("zenity");
-        cmd.arg("--file-selection").arg("--save").arg(format!("--title={}", title));
-        if !default_name.is_empty() {
-            cmd.arg(format!("--filename={}", default_name));
-        }
-        if !patterns.is_empty() {
-            cmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
-            cmd.arg("--file-filter=All Files | *");
-        }
-        match cmd.output() {
-            Ok(output) if output.status.success() => {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                if !err.trim().is_empty() {
-                    let mut retry_cmd = std::process::Command::new("zenity");
-                    retry_cmd.arg("--file-selection").arg("--save").arg(format!("--title={}", title));
-                    if !default_name.is_empty() {
-                        retry_cmd.arg(format!("--filename={}", default_name));
-                    }
-                    if let Ok(retry_output) = retry_cmd.output() {
-                        if retry_output.status.success() {
-                            let path = String::from_utf8_lossy(&retry_output.stdout).trim().to_string();
-                            if !path.is_empty() {
-                                return Some(path);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-
-        // 2. Try yad
-        let mut ycmd = std::process::Command::new("yad");
-        ycmd.arg("--file-selection").arg("--save").arg(format!("--title={}", title));
-        if !default_name.is_empty() {
-            ycmd.arg(format!("--filename={}", default_name));
-        }
-        if let Ok(output) = ycmd.output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
-        }
-
-        // 3. Try kdialog
-        let mut kcmd = std::process::Command::new("kdialog");
         let kde_filter = if !patterns.is_empty() {
             format!("{}|{}\n*|All Files", patterns, clean_desc)
         } else {
             "*".to_string()
         };
-        kcmd.arg("--getsavefilename").arg(default_name).arg(kde_filter).arg("--title").arg(title);
-        if let Ok(output) = kcmd.output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
+
+        let env = detect_desktop_env();
+
+        let try_zenity = || {
+            if !is_command_available("zenity") { return None; }
+            let mut cmd = std::process::Command::new("zenity");
+            configure_cmd_env(&mut cmd);
+            cmd.arg("--file-selection").arg("--save").arg(format!("--title={}", title));
+            if !default_name.is_empty() {
+                cmd.arg(format!("--filename={}", default_name));
+            }
+            if !patterns.is_empty() {
+                cmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
+                cmd.arg("--file-filter=All Files | *");
+            }
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
                 }
             }
-        }
+            None
+        };
 
-        // 4. Try Python 3 Tkinter
-        let py_script = format!(
-            "import sys\n\
-             try:\n\
-                 import tkinter as tk\n\
-                 from tkinter import filedialog\n\
-                 root = tk.Tk()\n\
-                 root.withdraw()\n\
-                 f = filedialog.asksaveasfilename(title={:?}, initialfile={:?})\n\
-                 if f: sys.stdout.write(f)\n\
-             except Exception:\n\
-                 pass",
-            title, default_name
-        );
-        let mut py_cmd = std::process::Command::new("python3");
-        py_cmd.arg("-c").arg(&py_script);
-        if let Ok(output) = py_cmd.output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
+        let try_yad = || {
+            if !is_command_available("yad") { return None; }
+            let mut ycmd = std::process::Command::new("yad");
+            configure_cmd_env(&mut ycmd);
+            ycmd.arg("--file-selection").arg("--save").arg(format!("--title={}", title));
+            if !default_name.is_empty() {
+                ycmd.arg(format!("--filename={}", default_name));
+            }
+            if !patterns.is_empty() {
+                ycmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
+                ycmd.arg("--file-filter=All Files | *");
+            }
+            if let Ok(output) = ycmd.output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
                 }
             }
-        }
+            None
+        };
 
-        None
+        let try_kdialog = || {
+            if !is_command_available("kdialog") { return None; }
+            let mut kcmd = std::process::Command::new("kdialog");
+            configure_cmd_env(&mut kcmd);
+            kcmd.arg("--getsavefilename").arg(default_name).arg(&kde_filter).arg("--title").arg(title);
+            if let Ok(output) = kcmd.output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        };
+
+        let try_python_gtk = || {
+            if !is_command_available("python3") { return None; }
+            let script = format!(
+                r#"import sys
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk
+    dialog = Gtk.FileChooserDialog(
+        title={title:?},
+        action=Gtk.FileChooserAction.SAVE
+    )
+    dialog.add_buttons(
+        "_Cancel", Gtk.ResponseType.CANCEL,
+        "_Save", Gtk.ResponseType.ACCEPT
+    )
+    dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+    dialog.set_do_overwrite_confirmation(True)
+    if {default_name:?}:
+        dialog.set_current_name({default_name:?})
+
+    f1 = Gtk.FileFilter()
+    f1.set_name({clean_desc:?})
+    for pat in {patterns:?}.split():
+        if pat:
+            f1.add_pattern(pat)
+    dialog.add_filter(f1)
+
+    resp = dialog.run()
+    if resp == Gtk.ResponseType.ACCEPT:
+        fn = dialog.get_filename()
+        if fn:
+            sys.stdout.write(fn)
+    dialog.destroy()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+    sys.exit(0)
+except Exception:
+    sys.exit(2)
+"#,
+                title = title,
+                default_name = default_name,
+                clean_desc = clean_desc,
+                patterns = patterns
+            );
+
+            let mut cmd = std::process::Command::new("python3");
+            configure_cmd_env(&mut cmd);
+            cmd.arg("-c").arg(&script);
+
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        };
+
+        let try_python_qt = || {
+            if !is_command_available("python3") { return None; }
+            let script = format!(
+                r#"import sys
+def try_qt():
+    for mod in ['PyQt5', 'PyQt6', 'PySide2', 'PySide6']:
+        try:
+            widgets = __import__(mod + '.QtWidgets', fromlist=['QApplication', 'QFileDialog'])
+            QApp = getattr(widgets, 'QApplication')
+            QFD = getattr(widgets, 'QFileDialog')
+            app = QApp.instance() or QApp(sys.argv)
+            res = QFD.getSaveFileName(None, {title:?}, {default_name:?}, {kde_filter:?})
+            fn = res[0] if isinstance(res, tuple) else res
+            if fn:
+                sys.stdout.write(str(fn))
+            sys.exit(0)
+        except Exception:
+            continue
+    sys.exit(2)
+try_qt()
+"#,
+                title = title,
+                default_name = default_name,
+                kde_filter = kde_filter
+            );
+
+            let mut cmd = std::process::Command::new("python3");
+            configure_cmd_env(&mut cmd);
+            cmd.arg("-c").arg(&script);
+
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        };
+
+        let try_python_tkinter = || {
+            if !is_command_available("python3") { return None; }
+            let py_script = format!(
+                "import sys\n\
+                 try:\n\
+                     import tkinter as tk\n\
+                     from tkinter import filedialog\n\
+                     root = tk.Tk()\n\
+                     root.withdraw()\n\
+                     f = filedialog.asksaveasfilename(title={:?}, initialfile={:?})\n\
+                     if f: sys.stdout.write(f)\n\
+                 except Exception:\n\
+                     pass",
+                title, default_name
+            );
+            let mut cmd = std::process::Command::new("python3");
+            configure_cmd_env(&mut cmd);
+            cmd.arg("-c").arg(&py_script);
+
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
+                }
+            }
+            None
+        };
+
+        match env {
+            LinuxDesktopEnv::KdeDolphin => {
+                if let Some(p) = try_kdialog() { return Some(p); }
+                if let Some(p) = try_python_qt() { return Some(p); }
+                if let Some(p) = try_zenity() { return Some(p); }
+                if let Some(p) = try_yad() { return Some(p); }
+                if let Some(p) = try_python_gtk() { return Some(p); }
+                try_python_tkinter()
+            }
+            _ => {
+                if let Some(p) = try_zenity() { return Some(p); }
+                if let Some(p) = try_yad() { return Some(p); }
+                if let Some(p) = try_python_gtk() { return Some(p); }
+                if let Some(p) = try_kdialog() { return Some(p); }
+                if let Some(p) = try_python_qt() { return Some(p); }
+                try_python_tkinter()
+            }
+        }
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_linux_filter() {
+        let (desc, patterns) = parse_linux_filter(
+            "Disk Images (*.iso;*.img;*.bin;*.vhd;*.raw)",
+            "*.iso;*.img;*.bin;*.vhd;*.raw",
+        );
+        assert_eq!(desc, "Disk Images");
+        assert!(patterns.contains("*.iso"));
+        assert!(patterns.contains("*.ISO"));
+        assert!(patterns.contains("*.img"));
+        assert!(patterns.contains("*.IMG"));
+        assert!(!patterns.contains(';'));
+    }
+}

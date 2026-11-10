@@ -1,5 +1,5 @@
 Name:           pigeon
-Version:        1.0.0
+Version:        1.11.0
 Release:        1%{?dist}
 Summary:        Next-Generation bootable USB drive creator
 License:        GPL-3.0-or-later

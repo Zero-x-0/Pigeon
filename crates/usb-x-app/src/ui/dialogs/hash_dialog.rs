@@ -74,17 +74,7 @@ pub fn show_hash_dialog(ctx: &Context, state: &mut AppState) {
                         .min_size(Vec2::new(150.0, 26.0));
 
                         if ui.add(browse_btn).clicked() {
-                            if usb_x_platform::has_native_file_dialog() {
-                                if let Some(chosen) = usb_x_platform::open_file_dialog(
-                                    "Select Bootable ISO or Disk Image",
-                                    "Disk Images (*.iso;*.img;*.bin;*.vhd;*.raw)",
-                                    "*.iso;*.img;*.bin;*.vhd;*.raw",
-                                ) {
-                                    state.load_image_file(chosen);
-                                }
-                            } else {
-                                state.open_file_browser();
-                            }
+                            state.trigger_file_dialog();
                         }
                     } else {
                         let filename = std::path::Path::new(&state.image_path)

@@ -11,8 +11,8 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "1.0.0"
+version = "1.11.0"
 authors = ["Pigeon Contributors"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/pigeon-usb/pigeon"
+repository = "https://github.com/Zero-x-0/Pigeon"
 

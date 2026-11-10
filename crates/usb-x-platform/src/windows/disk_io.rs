@@ -356,6 +356,46 @@ pub fn create_mbr_partition_on_disk(
     Ok(())
 }
 
+pub fn clean_and_repartition_disk(
+    disk_number: u32,
+    total_size_bytes: u64,
+    is_fat32: bool,
+) -> Result<()> {
+    let res = unsafe {
+        c_bindings::c_clean_and_repartition_disk(
+            disk_number,
+            total_size_bytes,
+            if is_fat32 { 1 } else { 0 },
+        )
+    };
+    if res != 0 {
+        return Err(UsbXError::Io {
+            operation: "c_clean_and_repartition_disk".to_string(),
+            message: format!(
+                "Failed to clean partitions on PhysicalDrive{}: Win32 error {}",
+                disk_number, res
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub fn wait_for_volume_ready(disk_number: u32, timeout_ms: u64) -> Option<String> {
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(200);
+    while start.elapsed().as_millis() < timeout_ms as u128 {
+        let vols = get_volumes_for_disk(disk_number);
+        if let Some(v) = vols.first() {
+            let p = format!("{}:\\", v.drive_letter);
+            if std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+        std::thread::sleep(poll_interval);
+    }
+    None
+}
+
 pub struct VirtualIsoMount {
     pub vdisk_handle: *mut std::ffi::c_void,
     pub drive_root: String,

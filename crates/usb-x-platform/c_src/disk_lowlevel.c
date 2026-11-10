@@ -550,6 +550,159 @@ int c_create_mbr_partition(
     return 0;
 }
 
+// 6b. Deep Partition Cleaner & Single 100% Capacity Partition Recreator
+// Deletes all existing partitions (MBR and primary/backup GPT) and recreates a clean partition table.
+int c_clean_and_repartition_disk(
+    unsigned int disk_number,
+    unsigned long long total_size_bytes,
+    int is_fat32
+) {
+    if (total_size_bytes < (2048ULL * 512ULL + 1024ULL * 1024ULL)) {
+        return -1; // Disk too small
+    }
+
+    HANDLE h_disk = INVALID_HANDLE_VALUE;
+    int open_err = c_open_physical_disk(disk_number, &h_disk);
+    if (open_err != 0 || h_disk == INVALID_HANDLE_VALUE) {
+        return open_err != 0 ? open_err : -2;
+    }
+
+    // 1. Wipe the first 2048 sectors (first 1 MB) to delete MBR, Primary GPT, and volume headers
+    unsigned char zero_buf[65536]; // 64 KB buffer
+    memset(zero_buf, 0, sizeof(zero_buf));
+    unsigned int written = 0;
+
+    for (unsigned int chunk = 0; chunk < 16; chunk++) {
+        unsigned long long offset = (unsigned long long)chunk * sizeof(zero_buf);
+        c_write_disk_sectors(h_disk, offset, zero_buf, sizeof(zero_buf), &written);
+    }
+
+    // 2. Wipe the last 2048 sectors (last 1 MB) to destroy any backup/secondary GPT headers
+    unsigned long long total_sectors = total_size_bytes / 512ULL;
+    if (total_sectors > 2048ULL) {
+        unsigned long long backup_start_sector = total_sectors - 2048ULL;
+        unsigned long long backup_start_byte = backup_start_sector * 512ULL;
+        for (unsigned int chunk = 0; chunk < 16; chunk++) {
+            unsigned long long offset = backup_start_byte + (unsigned long long)chunk * sizeof(zero_buf);
+            c_write_disk_sectors(h_disk, offset, zero_buf, sizeof(zero_buf), &written);
+        }
+    }
+
+    // 3. Flush and force kernel to drop all existing partitions
+    c_flush_disk_buffers(h_disk);
+    c_update_disk_properties(h_disk);
+
+    // 4. Build standard Sector 0 MBR covering 100% of the drive
+    unsigned int starting_lba = 2048; // Standard 1 MB alignment
+    unsigned long long part_sectors_64 = (total_sectors > starting_lba) ? (total_sectors - starting_lba) : 0;
+    unsigned int sector_count = (part_sectors_64 > 0xFFFFFFF0ULL) ? 0xFFFFFFFFU : (unsigned int)part_sectors_64;
+
+    unsigned char sector0[512];
+    memset(sector0, 0, 512);
+
+    // Standard x86 MBR bootloader code
+    static const unsigned char mbr_bootcode[] = {
+        0x33, 0xC0, 0x8E, 0xD0, 0xBC, 0x00, 0x7C, 0xFB, 0x50, 0x07, 0x50, 0x1F, 0xFC, 0xBE, 0x1B, 0x7C,
+        0xBF, 0x1B, 0x06, 0x50, 0x57, 0xB9, 0xE5, 0x01, 0xF3, 0xA4, 0xCB, 0xBD, 0xBE, 0x07, 0xB1, 0x04,
+        0x38, 0x6E, 0x00, 0x7C, 0x09, 0x75, 0x13, 0x83, 0xC5, 0x10, 0xE2, 0xF4, 0xCD, 0x18, 0x8B, 0xF5,
+        0x83, 0xC6, 0x10, 0x49, 0x74, 0x19, 0x38, 0x2C, 0x74, 0xF6, 0xA0, 0xB5, 0x07, 0xB4, 0x07, 0x8B,
+        0xF0, 0xAC, 0x3C, 0x00, 0x74, 0xFC, 0xBB, 0x07, 0x00, 0xB4, 0x0E, 0xCD, 0x10, 0xEB, 0xF2, 0x88,
+        0x4E, 0x10, 0xE8, 0x46, 0x00, 0x73, 0x2A, 0xFE, 0x46, 0x10, 0x80, 0x7E, 0x04, 0x0B, 0x74, 0x0B,
+        0x80, 0x7E, 0x04, 0x0C, 0x74, 0x05, 0xA0, 0xB6, 0x07, 0x75, 0xD2, 0x80, 0x46, 0x02, 0x06, 0x83,
+        0x46, 0x08, 0x06, 0x83, 0x56, 0x0A, 0x00, 0xE8, 0x21, 0x00, 0x73, 0x05, 0xA0, 0xB6, 0x07, 0xEB,
+        0xBC, 0x81, 0x3E, 0xFE, 0x7D, 0x55, 0xAA, 0x75, 0xB4, 0xFF, 0x76, 0x00, 0xE8, 0x0D, 0x00, 0x75,
+        0x17, 0xFA, 0xB0, 0xD1, 0xE6, 0x64, 0xE8, 0x0F, 0x00, 0xB0, 0xDF, 0xE6, 0x60, 0xE8, 0x07, 0x00,
+        0xB0, 0xFF, 0xE6, 0x64, 0xE8, 0x00, 0x00, 0xC3
+    };
+    memcpy(sector0, mbr_bootcode, sizeof(mbr_bootcode));
+
+    // Disk signature at offset 440 (0x1B8)
+    sector0[440] = 0x50; // 'P'
+    sector0[441] = 0x49; // 'I'
+    sector0[442] = 0x47; // 'G'
+    sector0[443] = 0x4E; // 'N'
+
+    // Partition Entry 1 at offset 446 (0x1BE)
+    sector0[446] = 0x80; // Active / Bootable flag
+    sector0[447] = 0x01; // Start Head
+    sector0[448] = 0x01; // Start Sector
+    sector0[449] = 0x00; // Start Cylinder
+    sector0[450] = is_fat32 ? 0x0C : 0x07; // 0x0C = FAT32 LBA, 0x07 = NTFS/exFAT
+    sector0[451] = 0xFE; // End Head
+    sector0[452] = 0xFF; // End Sector
+    sector0[453] = 0xFF; // End Cylinder
+
+    // Starting LBA (little endian)
+    sector0[454] = (unsigned char)(starting_lba & 0xFF);
+    sector0[455] = (unsigned char)((starting_lba >> 8) & 0xFF);
+    sector0[456] = (unsigned char)((starting_lba >> 16) & 0xFF);
+    sector0[457] = (unsigned char)((starting_lba >> 24) & 0xFF);
+
+    // Sector Count (little endian)
+    sector0[458] = (unsigned char)(sector_count & 0xFF);
+    sector0[459] = (unsigned char)((sector_count >> 8) & 0xFF);
+    sector0[460] = (unsigned char)((sector_count >> 16) & 0xFF);
+    sector0[461] = (unsigned char)((sector_count >> 24) & 0xFF);
+
+    // MBR Boot Signature at 510-511
+    sector0[510] = 0x55;
+    sector0[511] = 0xAA;
+
+    // 5. Write clean Sector 0 directly to PhysicalDrive
+    int write_err = c_write_disk_sectors(h_disk, 0, sector0, 512, &written);
+    if (write_err != 0) {
+        c_close_disk_handle(h_disk);
+        return write_err;
+    }
+
+    // 6. Set drive layout with single partition and 3 empty slots
+    DWORD layout_size = sizeof(DRIVE_LAYOUT_INFORMATION_EX) + 3 * sizeof(PARTITION_INFORMATION_EX);
+    DRIVE_LAYOUT_INFORMATION_EX* p_layout = (DRIVE_LAYOUT_INFORMATION_EX*)malloc(layout_size);
+    if (p_layout) {
+        memset(p_layout, 0, layout_size);
+        p_layout->PartitionStyle = PARTITION_STYLE_MBR;
+        p_layout->PartitionCount = 4;
+        p_layout->Mbr.Signature = 0x4E474950; // "PIGN"
+
+        p_layout->PartitionEntry[0].PartitionStyle = PARTITION_STYLE_MBR;
+        p_layout->PartitionEntry[0].StartingOffset.QuadPart = (LONGLONG)starting_lba * 512ULL;
+        p_layout->PartitionEntry[0].PartitionLength.QuadPart = (LONGLONG)sector_count * 512ULL;
+        p_layout->PartitionEntry[0].PartitionNumber = 1;
+        p_layout->PartitionEntry[0].RewritePartition = TRUE;
+        p_layout->PartitionEntry[0].Mbr.PartitionType = is_fat32 ? 0x0C : 0x07;
+        p_layout->PartitionEntry[0].Mbr.BootIndicator = TRUE;
+        p_layout->PartitionEntry[0].Mbr.RecognizedPartition = TRUE;
+        p_layout->PartitionEntry[0].Mbr.HiddenSectors = starting_lba;
+
+        for (int i = 1; i < 4; i++) {
+            p_layout->PartitionEntry[i].RewritePartition = TRUE;
+        }
+
+        DWORD returned = 0;
+        DeviceIoControl(
+            h_disk,
+            IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+            p_layout,
+            layout_size,
+            NULL,
+            0,
+            &returned,
+            NULL
+        );
+        free(p_layout);
+    }
+
+    // 7. Flush buffers and reload partition properties in Windows kernel
+    c_flush_disk_buffers(h_disk);
+    c_update_disk_properties(h_disk);
+    c_close_disk_handle(h_disk);
+
+    // 8. Broadcast shell change notification so Windows Explorer picks up the new partition
+    c_notify_shell_media_change(NULL);
+
+    return 0;
+}
+
 // 7. Virtual Disk ISO Mounting via virtdisk.dll
 typedef DWORD (WINAPI *PFN_OpenVirtualDisk)(
     PVIRTUAL_STORAGE_TYPE VirtualStorageType,

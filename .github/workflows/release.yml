@@ -45,7 +45,7 @@ jobs:
   build-linux:
     name: Build Linux Packages (.AppImage, .deb, .rpm)
     needs: verify
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
@@ -76,7 +76,7 @@ jobs:
   build-windows:
     name: Build Windows Executable (.exe)
     needs: verify
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
@@ -111,7 +111,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     needs: [build-linux, build-windows]
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
@@ -123,6 +123,21 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
+      - name: Determine Release Version & Tag
+        id: meta
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Generate SHA-256 Checksums
         run: |
           cd release-artifacts
@@ -132,7 +147,9 @@ jobs:
       - name: Attach Release Packages to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Pigeon v${{ steps.meta.outputs.version }}"
+          target_commitish: ${{ github.sha }}
           body_path: CHANGELOG.md
           generate_release_notes: true
           files: release-artifacts/*

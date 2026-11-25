@@ -1,101 +1,124 @@
 <div align="center">
 
-<img src="assets/pigeon.png" alt="Pigeon Logo" width="180"/>
+<img src="assets/pigeon.png" alt="Pigeon Logo" width="150"/>
 
-# 🐦 Pigeon
+# Pigeon
 
-**Next-Generation Bootable USB Creator & Disk Imaging Utility**  
-**Version 1.11 (Production Release)**
+**Fast, Lightweight Bootable USB Creator & Disk Imaging Utility**
+**Version 1.11.26**
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Rust: 2021](https://img.shields.io/badge/Rust-2021_Edition-orange.svg)](https://www.rust-lang.org)
-[![Release: v1.11](https://img.shields.io/badge/Release-v1.11-brightgreen.svg)](https://github.com/Zero-x-0/Pigeon/releases/latest)
-[![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/Zero-x-0/Pigeon/releases/latest)
+[![Release: v1.11.26](https://img.shields.io/badge/Release-v1.11.26-brightgreen.svg)](https://github.com/Zero-x-0/Pigeon/releases/latest)
+[![Platform: Linux & Windows](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/Zero-x-0/Pigeon/releases/latest)
 
-A blazingly fast, lightweight, and memory-safe desktop tool for flashing bootable media, creating raw disk images, bypassing Windows 11 restrictions, and checking drive health. Built in pure Rust with direct sector streaming.
+A native Rust (`egui` + `eframe`) desktop utility modeled after Rufus for creating bootable USB media, streaming raw or compressed disk images, and verifying flash drives on Linux and Windows.
 
-[Downloads](#-downloads) • [Features](#-features) • [Quick Start](#-quick-start) • [Build from Source](#-build-from-source)
+[Downloads](#-downloads) • [Current Functionality](#-current-functionality) • [Shortcuts](#-keyboard-shortcuts) • [Quick Start](#-quick-start) • [Build from Source](#-build-from-source) • [Changelog](CHANGELOG.md)
 
 </div>
 
 ---
 
-## 📦 Downloads
+## Downloads
 
-Pre-compiled production binaries for all platforms are available on the **[GitHub Releases Page](https://github.com/Zero-x-0/Pigeon/releases/latest)**:
+Release builds are automated via [`.github/workflows/release.yml`](.github/workflows/release.yml) and published on **[GitHub Releases](https://github.com/Zero-x-0/Pigeon/releases/latest)**:
 
-| Platform / Distro | Package Format | Direct Download | Description |
-| :--- | :--- | :--- | :--- |
-| **Windows 10 / 11** | **Portable `.exe`** | [**`pigeon-1.11.0-windows-x64.exe`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Standalone portable executable (No install required) |
-| **Linux (Universal)** | **AppImage** | [**`Pigeon-1.11.0-x86_64.AppImage`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Single portable executable for all modern Linux distros |
-| **Debian / Ubuntu / Kali** | **`.deb` package** | [**`pigeon_1.11.0_amd64.deb`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Native package with desktop launcher & icon |
-| **Fedora / RHEL / openSUSE** | **`.rpm` package** | [**`pigeon-1.11.0-1.x86_64.rpm`**](https://github.com/Zero-x-0/Pigeon/releases/latest) | Native RPM package |
-
----
-
-## 🌟 Features
-
-* **High Performance & Safe:** Direct sector streaming in pure Rust with zero garbage collection and strictly protected host system disks.
-* **Windows 11 Customizer (OOBE Bypass):** Automatically removes restrictions for TPM 2.0, Secure Boot, and 4 GB+ RAM, bypasses mandatory online accounts (`BypassNRO`), and disables telemetry.
-* **Desktop File Manager Integration:** Native integration with **Thunar** (XFCE / Kali Linux), **Dolphin** (KDE Plasma), **Nautilus** (GNOME / Ubuntu), and **Nemo** (Cinnamon / Mint).
-* **Free-Floating Built-In File Manager:** When native dialogs are unavailable, Pigeon opens an independent, movable, and resizable desktop window with interactive breadcrumbs, direct path input, real-time search, and quick access to system drives.
-* **Multi-Partition Auto-Cleaner:** Automatically cleans and repartitions USB drives with multiple existing partitions before writing to prevent boot corruption.
-* **Background Checksums:** Computes **SHA-256**, **MD5**, and high-speed **CRC-32** hashes concurrently with instant matching against expected values.
-* **Drive Health & Fake Flash Testing:** Non-destructive and pattern-based verification passes to detect bad blocks and counterfeit capacity drives.
-* **Drag & Drop:** Drop any `.iso`, `.img`, `.bin`, `.raw`, or `.vhd` directly onto the window.
-* **Adaptive Dark/Light Theme:** Matches OS appearance and system accent color on Windows and Linux.
+| Platform / Distro | Format | Artifact |
+| :--- | :--- | :--- |
+| **Linux (Universal)** | **AppImage** | `Pigeon-1.11.26-x86_64.AppImage` |
+| **Debian / Ubuntu / Kali** | **`.deb`** | `pigeon_1.11.26_amd64.deb` |
+| **Fedora / RHEL / openSUSE** | **`.rpm`** | `pigeon-1.11.26-1.x86_64.rpm` |
+| **Windows 10 / 11** | **Portable `.exe`** | `pigeon-1.11.26-windows-x64.exe` |
 
 ---
 
-## 🚀 Quick Start
+## Current Functionality
+
+### Bootable USB & Disk Imaging
+- **Single-Pass Windows Boot (`UEFI:NTFS`, Linux & Windows):**
+  - Creates a dual-partition layout combining an **NTFS** data partition (`Main Data Partition`) with Rufus's embedded 1 MiB FAT12 `uefi-ntfs.img` partition (`UEFI:NTFS`) on both **GPT** (`msftdata` + no-drive-letter attribute) and **MBR** (`0x07` active + `0xEF`).
+  - Extracts Windows setup ISOs in a single `0% → 100%` pass without duplicate `boot.wim` copying and supports `>4 GB` `install.wim` natively.
+  - Supports Legacy BIOS boot on MBR (sector 0 boot code / optional Linux `grub-install` chainloader when available).
+- **Linux ISOHybrid & Persistent Storage:**
+  - Supports both **ISO Image Mode** (filesystem extraction + UEFI `/EFI/BOOT/bootx64.efi` fallback) and **DD Image Mode** (raw sector write).
+  - Creates an optional secondary `ext4` persistence partition (`casper-rw` for Ubuntu derivatives or `persistence` with `/persistence.conf` for Debian/Kali).
+- **Compressed & Raw DD Streaming:**
+  - Streams `.img`, `.bin`, `.raw`, `.vhd`, `.dd`, `.gz`, `.xz`, `.bz2`, and `.zst` directly to block devices with 4 MiB chunks and optional post-write SHA-256 verification.
+- **High-Throughput Linux I/O:**
+  - Uses kernel `ntfs3` (`prealloc` / `posix_fallocate`) and pipelined asynchronous `sync_file_range` writeback to avoid flush stalls.
+- **Non-Bootable Formatting & Options:**
+  - Formats drives as `FAT32`, `NTFS`, or `exFAT` with selectable cluster sizes, quick/full format, optional `autorun.inf` extended label/icon files, and MBR old-BIOS partition alignment.
+
+### Interface, Theme & Diagnostics
+- **Dynamic Auto-Sizing Window:**
+  - Fixed `430` px width with non-maximizable, non-stretchable bounds that automatically grow and shrink vertically when collapsible panels (*Show advanced drive properties*, *Show advanced format options*) or persistence sliders are shown.
+- **Live Light & Dark Theme Sync:**
+  - Automatically syncs with FreeDesktop XDG Portal (`org.freedesktop.appearance.color-scheme`), GNOME `color-scheme`/`gtk-theme`, XFCE, and KDE every `650` ms across both `pkexec`/`sudo` and regular Linux sessions, and Win32 `AppsUseLightTheme`/`AccentColor` on Windows (overridable via Settings or `Ctrl+Alt+D`).
+- **Log Window:**
+  - Displays clean `Extracting: /path/to/file (size)` logs without progress-percentage clutter, smooth single-line virtualized scrolling, **Copy**, **Clear**, and async **Save** (`pigeon.log`).
+- **ISO Selector, Downloader & Built-In File Browser:**
+  - Supports drag-and-drop, native desktop file dialogs (with a floating cross-platform browser fallback), and an **ISO Download** dialog supporting direct official Ubuntu/Arch ISO downloads or opening Microsoft's official Windows download portal.
+- **Drive Safety, Checksums, Backup & Health Checks:**
+  - Lists external USB and SD storage devices (`<Name> [<Size>]`) with optional USB HDD toggle (`Alt+F`), blocks destructive writes to host OS/system disks, and requires typed confirmation before erasing media.
+  - Includes background image hashing (`MD5`, `SHA-1`, `SHA-256`, `SHA-512`, `CRC-32`), raw drive backup to `.img`, and multi-pass bad-blocks / counterfeit-capacity verification (`1`, `2`, or `4` passes).
+
+---
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+| :--- | :--- |
+| **`F5`** | Refresh connected external USB / SD devices |
+| **`Alt+H`** | Compute and display image checksums (with SHA-512) |
+| **`Alt+F`** | Toggle listing external USB hard drives |
+| **`Ctrl+Alt+D`** | Toggle Light / Dark theme override |
+
+---
+
+## Quick Start
 
 ### Linux
-
 ```bash
-# Run standalone AppImage:
-chmod +x Pigeon-1.11.0-x86_64.AppImage
-sudo ./Pigeon-1.11.0-x86_64.AppImage
+# Portable AppImage
+chmod +x Pigeon-1.11.26-x86_64.AppImage
+./Pigeon-1.11.26-x86_64.AppImage
 
-# Or install .deb on Kali / Debian / Ubuntu:
-sudo dpkg -i pigeon_1.11.0_amd64.deb
-sudo pigeon
+# Debian / Ubuntu / Kali (.deb)
+sudo dpkg -i pigeon_1.11.26_amd64.deb
+pigeon
 
-# Or install .rpm on Fedora / RHEL:
-sudo rpm -i pigeon-1.11.0-1.x86_64.rpm
-sudo pigeon
+# Fedora / RHEL / openSUSE (.rpm)
+sudo rpm -i pigeon-1.11.26-1.x86_64.rpm
+pigeon
 ```
+*(Prompts for root elevation via `pkexec` or `sudo` on launch for raw block-device access.)*
 
 ### Windows
-
-Download `pigeon-1.11.0-windows-x64.exe` from [Releases](https://github.com/Zero-x-0/Pigeon/releases/latest) and double-click or run from PowerShell:
-```powershell
-.\pigeon-1.11.0-windows-x64.exe
-```
-*(Prompts for Administrator privileges required for physical disk streaming)*
+Download and run `pigeon-1.11.26-windows-x64.exe` (requests Administrator UAC elevation for raw physical drive access).
 
 ---
 
-## 🛠️ Build from Source
+## Build from Source
 
 ```bash
-# Clone the repository
-git clone https://github.com/Zero-x-0/Pigeon.git
-cd Pigeon
-
-# Run tests
+# Check workspace and run unit tests
+cargo check --workspace --all-targets
 cargo test --workspace
 
-# Build optimized binary
-cargo build --release -p pigeon
-```
-
-To build all Linux release packages (`.deb`, `.rpm`, `.AppImage`):
-```bash
+# Build Linux packages (.AppImage, .deb, .rpm) into ./release/
 bash dist/linux/build-all-linux.sh
 ```
 
+To compile the Windows x64 executable (requires MSYS2 MinGW64 on Windows, or `mingw-w64` on Linux):
+```bash
+rustup target add x86_64-pc-windows-gnu
+cargo build --release -p pigeon --target x86_64-pc-windows-gnu
+```
+
 ---
 
-## 📄 License
+## Changelog & License
 
-Pigeon is open-source software licensed under the [GNU General Public License v3.0 or later](LICENSE).
+- Release history: [CHANGELOG.md](CHANGELOG.md)
+- License: [GNU General Public License v3.0 or later](LICENSE)

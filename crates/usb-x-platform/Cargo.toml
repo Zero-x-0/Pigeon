@@ -4,12 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 cc = "1.0"
 
 [dependencies]
 usb-x-core = { path = "../usb-x-core" }
-tempfile = "3.27.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

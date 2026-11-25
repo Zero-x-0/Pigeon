@@ -72,10 +72,20 @@ def create_cpio_entry(filename, data, mode=0o100755):
     entry += b"\x00" * pad_data
     return entry
 
-def build_rpm(output_path, bin_path, desktop_path, icon_path):
+def read_workspace_version(root_dir):
+    import re
+    cargo_toml = os.path.join(root_dir, "Cargo.toml")
+    if os.path.exists(cargo_toml):
+        with open(cargo_toml, 'r', encoding='utf-8') as f:
+            m = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.MULTILINE)
+            if m:
+                return m.group(1)
+    return "1.11.26"
+
+def build_rpm(output_path, version, bin_path, desktop_path, icon_path):
     with open(output_path, 'wb') as f:
         # 1. Lead (96 bytes)
-        name = "pigeon-1.11.0-1".encode('ascii')[:65].ljust(66, b'\x00')
+        name = f"pigeon-{version}-1".encode('ascii')[:65].ljust(66, b'\x00')
         lead = RPM_MAGIC + struct.pack(">BBhh66shh16s", 3, 0, 0, 1, name, 1, 5, b"\x00" * 16)
         f.write(lead)
 
@@ -110,9 +120,9 @@ def build_rpm(output_path, bin_path, desktop_path, icon_path):
         f.write(HEADER_MAGIC[:4])
         tags = [
             (RPMTAG_NAME, TYPE_STRING, b"pigeon\x00"),
-            (RPMTAG_VERSION, TYPE_STRING, b"1.11.0\x00"),
+            (RPMTAG_VERSION, TYPE_STRING, version.encode('ascii') + b"\x00"),
             (RPMTAG_RELEASE, TYPE_STRING, b"1\x00"),
-            (RPMTAG_SUMMARY, TYPE_STRING, b"Next-Generation bootable USB creator\x00"),
+            (RPMTAG_SUMMARY, TYPE_STRING, b"Fast, lightweight bootable USB creator\x00"),
             (RPMTAG_DESCRIPTION, TYPE_STRING, b"Fast and reliable bootable USB creator\x00"),
             (RPMTAG_LICENSE, TYPE_STRING, b"GPL-3.0-or-later\x00"),
             (RPMTAG_PAYLOADFORMAT, TYPE_STRING, b"cpio\x00"),
@@ -137,9 +147,10 @@ def build_rpm(output_path, bin_path, desktop_path, icon_path):
 if __name__ == "__main__":
     dir_path = os.path.dirname(os.path.abspath(__file__))
     root_dir = os.path.abspath(os.path.join(dir_path, "../.."))
+    version = read_workspace_version(root_dir)
     desktop_file = os.path.join(dir_path, "pigeon.desktop")
     icon_file = os.path.join(root_dir, "assets/pigeon.png")
-    out_rpm = os.path.join(dir_path, "pigeon-1.11.0-1.x86_64.rpm")
+    out_rpm = os.path.join(dir_path, f"pigeon-{version}-1.x86_64.rpm")
 
     candidate_bins = [
         os.path.join(root_dir, "target/linux/release/pigeon"),
@@ -158,4 +169,4 @@ if __name__ == "__main__":
     if not bin_file:
         raise FileNotFoundError(f"Valid Linux ELF binary (target/linux/release/pigeon) not found! Ensure Linux release build is complete.")
 
-    build_rpm(out_rpm, bin_file, desktop_file, icon_file)
+    build_rpm(out_rpm, version, bin_file, desktop_file, icon_file)

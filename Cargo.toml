@@ -11,8 +11,11 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "1.11.0"
-authors = ["Pigeon Contributors"]
+version = "1.11.26"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/Zero-x-0/Pigeon"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
 

@@ -51,6 +51,14 @@ int c_clean_and_repartition_disk(
     int is_fat32
 );
 
+int c_create_windows_uefi_ntfs_layout_on_handle(
+    HANDLE h_disk,
+    unsigned long long total_size_bytes,
+    int is_gpt,
+    const unsigned char* uefi_ntfs_img,
+    unsigned int uefi_ntfs_len
+);
+
 // 7. Virtual Disk ISO Mounting via virtdisk.dll
 int c_mount_iso_virtdisk(
     const wchar_t* iso_path,

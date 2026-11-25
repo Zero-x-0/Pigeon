@@ -89,16 +89,28 @@ def build_deb(output_path, control_content, binary_path, desktop_path, icon_path
 
     print(f"Created Debian package: {output_path} ({os.path.getsize(output_path)} bytes)")
 
+def read_workspace_version(root_dir):
+    import re
+    cargo_toml = os.path.join(root_dir, "Cargo.toml")
+    if os.path.exists(cargo_toml):
+        with open(cargo_toml, 'r', encoding='utf-8') as f:
+            m = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.MULTILINE)
+            if m:
+                return m.group(1)
+    return "1.11.26"
+
 if __name__ == "__main__":
     dir_path = os.path.dirname(os.path.abspath(__file__))
     root_dir = os.path.abspath(os.path.join(dir_path, "../.."))
+    version = read_workspace_version(root_dir)
     control_file = os.path.join(dir_path, "deb/DEBIAN/control")
     desktop_file = os.path.join(dir_path, "pigeon.desktop")
     icon_file = os.path.join(root_dir, "assets/pigeon.png")
-    out_deb = os.path.join(dir_path, "pigeon_1.11.0_amd64.deb")
+    out_deb = os.path.join(dir_path, f"pigeon_{version}_amd64.deb")
 
     with open(control_file, 'r', encoding='utf-8') as f:
-        control_text = f.read()
+        import re
+        control_text = re.sub(r'^Version:.*$', f'Version: {version}', f.read(), flags=re.MULTILINE)
 
     candidate_bins = [
         os.path.join(root_dir, "target/linux/release/pigeon"),

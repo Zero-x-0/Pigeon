@@ -81,6 +81,7 @@ pub fn relaunch_as_admin() -> bool {
 
 pub struct VolumeInfo {
     pub drive_letter: char,
+    pub partition_number: u32,
     pub volume_label: String,
     pub file_system: String,
     pub drive_type: u32,
@@ -160,6 +161,7 @@ pub fn get_volumes_for_disk(disk_number: u32) -> Vec<VolumeInfo> {
 
                         matching_volumes.push(VolumeInfo {
                             drive_letter: letter,
+                            partition_number: sdn.partition_number,
                             volume_label,
                             file_system,
                             drive_type,
@@ -378,6 +380,59 @@ pub fn clean_and_repartition_disk(
         });
     }
     Ok(())
+}
+
+pub fn create_windows_uefi_ntfs_layout(
+    disk_number: u32,
+    total_size_bytes: u64,
+    is_gpt: bool,
+    uefi_ntfs_img: &[u8],
+) -> Result<()> {
+    let session = open_and_lock_physical_disk(disk_number)?;
+    let res = unsafe {
+        c_bindings::c_create_windows_uefi_ntfs_layout_on_handle(
+            session.disk_handle,
+            total_size_bytes,
+            if is_gpt { 1 } else { 0 },
+            uefi_ntfs_img.as_ptr(),
+            uefi_ntfs_img.len() as u32,
+        )
+    };
+    drop(session);
+
+    if res != 0 {
+        return Err(UsbXError::Io {
+            operation: "c_create_windows_uefi_ntfs_layout".to_string(),
+            message: format!(
+                "Failed to write Rufus UEFI:NTFS partition layout on PhysicalDrive{}: Win32 error {}",
+                disk_number, res
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub fn wait_for_partition_volume_ready(
+    disk_number: u32,
+    target_partition_number: u32,
+    timeout_ms: u64,
+) -> Option<String> {
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(200);
+    while start.elapsed().as_millis() < timeout_ms as u128 {
+        let vols = get_volumes_for_disk(disk_number);
+        if let Some(v) = vols
+            .iter()
+            .find(|v| v.partition_number == target_partition_number)
+        {
+            let p = format!("{}:\\", v.drive_letter);
+            if std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+        std::thread::sleep(poll_interval);
+    }
+    None
 }
 
 pub fn wait_for_volume_ready(disk_number: u32, timeout_ms: u64) -> Option<String> {

@@ -4,6 +4,11 @@
 #include <shlobj.h>
 #include <winioctl.h>
 #include <virtdisk.h>
+#include <objbase.h>
+
+#ifndef GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER
+#define GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER 0x8000000000000000ULL
+#endif
 
 #ifndef IOCTL_DISK_UPDATE_PROPERTIES
 #define IOCTL_DISK_UPDATE_PROPERTIES 0x00070140
@@ -700,6 +705,211 @@ int c_clean_and_repartition_disk(
     // 8. Broadcast shell change notification so Windows Explorer picks up the new partition
     c_notify_shell_media_change(NULL);
 
+    return 0;
+}
+
+// 6c. Rufus UEFI:NTFS Dual-Partition Layout (GPT or MBR):
+// - Partition 1 (`Main Data Partition`): NTFS (1 MiB .. total - 2 MiB)
+// - Partition 2 (`UEFI:NTFS`): 1 MiB raw `uefi-ntfs.img` FAT12 UEFI NTFS driver/chainloader
+//   - GPT uses Microsoft Basic Data GUID + GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER (not ESP!)
+//   - MBR uses type 0x07 active + type 0xEF for Partition 2
+int c_create_windows_uefi_ntfs_layout_on_handle(
+    HANDLE h_disk,
+    unsigned long long total_size_bytes,
+    int is_gpt,
+    const unsigned char* uefi_ntfs_img,
+    unsigned int uefi_ntfs_len
+) {
+    if (h_disk == NULL || h_disk == INVALID_HANDLE_VALUE || !uefi_ntfs_img || uefi_ntfs_len < 512) {
+        return -1;
+    }
+    if (total_size_bytes < 64ULL * 1024ULL * 1024ULL) {
+        return -2;
+    }
+
+    static const unsigned char mbr_bootcode[] = {
+        0x33, 0xC0, 0x8E, 0xD0, 0xBC, 0x00, 0x7C, 0xFB, 0x50, 0x07, 0x50, 0x1F, 0xFC, 0xBE, 0x1B, 0x7C,
+        0xBF, 0x1B, 0x06, 0x50, 0x57, 0xB9, 0xE5, 0x01, 0xF3, 0xA4, 0xCB, 0xBD, 0xBE, 0x07, 0xB1, 0x04,
+        0x38, 0x6E, 0x00, 0x7C, 0x09, 0x75, 0x13, 0x83, 0xC5, 0x10, 0xE2, 0xF4, 0xCD, 0x18, 0x8B, 0xF5,
+        0x83, 0xC6, 0x10, 0x49, 0x74, 0x19, 0x38, 0x2C, 0x74, 0xF6, 0xA0, 0xB5, 0x07, 0xB4, 0x07, 0x8B,
+        0xF0, 0xAC, 0x3C, 0x00, 0x74, 0xFC, 0xBB, 0x07, 0x00, 0xB4, 0x0E, 0xCD, 0x10, 0xEB, 0xF2, 0x88,
+        0x4E, 0x10, 0xE8, 0x46, 0x00, 0x73, 0x2A, 0xFE, 0x46, 0x10, 0x80, 0x7E, 0x04, 0x0B, 0x74, 0x0B,
+        0x80, 0x7E, 0x04, 0x0C, 0x74, 0x05, 0xA0, 0xB6, 0x07, 0x75, 0xD2, 0x80, 0x46, 0x02, 0x06, 0x83,
+        0x46, 0x08, 0x06, 0x83, 0x56, 0x0A, 0x00, 0xE8, 0x21, 0x00, 0x73, 0x05, 0xA0, 0xB6, 0x07, 0xEB,
+        0xBC, 0x81, 0x3E, 0xFE, 0x7D, 0x55, 0xAA, 0x75, 0xB4, 0xFF, 0x76, 0x00, 0xE8, 0x0D, 0x00, 0x75,
+        0x17, 0xFA, 0xB0, 0xD1, 0xE6, 0x64, 0xE8, 0x0F, 0x00, 0xB0, 0xDF, 0xE6, 0x60, 0xE8, 0x07, 0x00,
+        0xB0, 0xFF, 0xE6, 0x64, 0xE8, 0x00, 0x00, 0xC3
+    };
+    static const GUID guid_msft_data = {
+        0xebd0a0a2, 0xb9e5, 0x4433, { 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7 }
+    };
+
+    const unsigned long long one_mib = 1048576ULL;
+    unsigned long long uefi_aligned = (((unsigned long long)uefi_ntfs_len + one_mib - 1ULL) / one_mib) * one_mib;
+    unsigned long long usable_end_aligned = (total_size_bytes / one_mib) * one_mib;
+    if (usable_end_aligned <= uefi_aligned + 3ULL * one_mib) {
+        return -3;
+    }
+
+    // Reserve 1 MiB at end for backup GPT alignment + uefi_aligned for Partition 2 (`UEFI:NTFS`)
+    unsigned long long p1_offset = one_mib;
+    unsigned long long p2_offset = usable_end_aligned - one_mib - uefi_aligned;
+    unsigned long long p1_length = p2_offset - p1_offset;
+    unsigned long long p2_length = uefi_aligned;
+
+    // 1. Zero first 1 MiB and last 1 MiB to clear stale MBR/GPT/VBR metadata
+    unsigned char zero_buf[65536];
+    memset(zero_buf, 0, sizeof(zero_buf));
+    unsigned int written = 0;
+
+    for (unsigned int chunk = 0; chunk < 16; chunk++) {
+        c_write_disk_sectors(h_disk, (unsigned long long)chunk * sizeof(zero_buf), zero_buf, sizeof(zero_buf), &written);
+    }
+    unsigned long long tail_start = total_size_bytes > one_mib ? (total_size_bytes - one_mib) & ~511ULL : 0;
+    if (tail_start > p2_offset + p2_length) {
+        for (unsigned int chunk = 0; chunk < 16; chunk++) {
+            c_write_disk_sectors(h_disk, tail_start + (unsigned long long)chunk * sizeof(zero_buf), zero_buf, sizeof(zero_buf), &written);
+        }
+    }
+
+    c_flush_disk_buffers(h_disk);
+    c_update_disk_properties(h_disk);
+
+    // 2. Write `uefi-ntfs.img` raw to Partition 2 offset BEFORE notifying Windows of the partition table
+    unsigned int off = 0;
+    while (off < uefi_ntfs_len) {
+        unsigned int chunk = uefi_ntfs_len - off;
+        if (chunk > 65536U) chunk = 65536U;
+        int werr = c_write_disk_sectors(h_disk, p2_offset + (unsigned long long)off, uefi_ntfs_img + off, chunk, &written);
+        if (werr != 0) {
+            return werr;
+        }
+        off += chunk;
+    }
+
+    // 3. Initialize disk partition style via IOCTL_DISK_CREATE_DISK
+    CREATE_DISK create_disk;
+    memset(&create_disk, 0, sizeof(create_disk));
+    DWORD returned = 0;
+    if (is_gpt) {
+        create_disk.PartitionStyle = PARTITION_STYLE_GPT;
+        CoCreateGuid(&create_disk.Gpt.DiskId);
+        create_disk.Gpt.MaxPartitionCount = 128;
+    } else {
+        create_disk.PartitionStyle = PARTITION_STYLE_MBR;
+        create_disk.Mbr.Signature = (DWORD)GetTickCount() ^ 0x55465552U;
+        if (create_disk.Mbr.Signature == 0) create_disk.Mbr.Signature = 0x55465552U;
+    }
+
+    if (!DeviceIoControl(h_disk, IOCTL_DISK_CREATE_DISK, &create_disk, sizeof(create_disk), NULL, 0, &returned, NULL)) {
+        return (int)GetLastError();
+    }
+
+    // 4. Write Sector 0 MBR bootstrap code for MBR mode so Legacy BIOS can chainload active NTFS PBR
+    if (!is_gpt) {
+        unsigned char sector0[512];
+        memset(sector0, 0, sizeof(sector0));
+        memcpy(sector0, mbr_bootcode, sizeof(mbr_bootcode));
+        memcpy(&sector0[440], &create_disk.Mbr.Signature, 4);
+        sector0[510] = 0x55;
+        sector0[511] = 0xAA;
+        c_write_disk_sectors(h_disk, 0, sector0, 512, &written);
+    }
+
+    // 5. Commit partition layout via IOCTL_DISK_SET_DRIVE_LAYOUT_EX
+    DWORD part_count = is_gpt ? 2 : 4;
+    DWORD layout_size = sizeof(DRIVE_LAYOUT_INFORMATION_EX) + (part_count - 1) * sizeof(PARTITION_INFORMATION_EX);
+    DRIVE_LAYOUT_INFORMATION_EX* p_layout = (DRIVE_LAYOUT_INFORMATION_EX*)malloc(layout_size);
+    if (!p_layout) {
+        return -4;
+    }
+    memset(p_layout, 0, layout_size);
+
+    if (is_gpt) {
+        p_layout->PartitionStyle = PARTITION_STYLE_GPT;
+        p_layout->PartitionCount = 2;
+        p_layout->Gpt.DiskId = create_disk.Gpt.DiskId;
+        p_layout->Gpt.StartingUsableOffset.QuadPart = 34LL * 512LL;
+        p_layout->Gpt.UsableLength.QuadPart = (LONGLONG)(total_size_bytes - 67ULL * 512ULL);
+        p_layout->Gpt.MaxPartitionCount = 128;
+
+        // Partition 1: NTFS Main Data Partition
+        p_layout->PartitionEntry[0].PartitionStyle = PARTITION_STYLE_GPT;
+        p_layout->PartitionEntry[0].StartingOffset.QuadPart = (LONGLONG)p1_offset;
+        p_layout->PartitionEntry[0].PartitionLength.QuadPart = (LONGLONG)p1_length;
+        p_layout->PartitionEntry[0].PartitionNumber = 1;
+        p_layout->PartitionEntry[0].RewritePartition = TRUE;
+        p_layout->PartitionEntry[0].Gpt.PartitionType = guid_msft_data;
+        CoCreateGuid(&p_layout->PartitionEntry[0].Gpt.PartitionId);
+        p_layout->PartitionEntry[0].Gpt.Attributes = 0;
+        {
+            const wchar_t* n1 = L"Main Data Partition";
+            for (int k = 0; k < 35 && n1[k]; k++) p_layout->PartitionEntry[0].Gpt.Name[k] = n1[k];
+        }
+
+        // Partition 2: UEFI:NTFS (Microsoft Basic Data + No Drive Letter attribute)
+        p_layout->PartitionEntry[1].PartitionStyle = PARTITION_STYLE_GPT;
+        p_layout->PartitionEntry[1].StartingOffset.QuadPart = (LONGLONG)p2_offset;
+        p_layout->PartitionEntry[1].PartitionLength.QuadPart = (LONGLONG)p2_length;
+        p_layout->PartitionEntry[1].PartitionNumber = 2;
+        p_layout->PartitionEntry[1].RewritePartition = TRUE;
+        p_layout->PartitionEntry[1].Gpt.PartitionType = guid_msft_data;
+        CoCreateGuid(&p_layout->PartitionEntry[1].Gpt.PartitionId);
+        p_layout->PartitionEntry[1].Gpt.Attributes = GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER;
+        {
+            const wchar_t* n2 = L"UEFI:NTFS";
+            for (int k = 0; k < 35 && n2[k]; k++) p_layout->PartitionEntry[1].Gpt.Name[k] = n2[k];
+        }
+    } else {
+        p_layout->PartitionStyle = PARTITION_STYLE_MBR;
+        p_layout->PartitionCount = 4;
+        p_layout->Mbr.Signature = create_disk.Mbr.Signature;
+
+        // Partition 1: NTFS Active Bootable
+        p_layout->PartitionEntry[0].PartitionStyle = PARTITION_STYLE_MBR;
+        p_layout->PartitionEntry[0].StartingOffset.QuadPart = (LONGLONG)p1_offset;
+        p_layout->PartitionEntry[0].PartitionLength.QuadPart = (LONGLONG)p1_length;
+        p_layout->PartitionEntry[0].PartitionNumber = 1;
+        p_layout->PartitionEntry[0].RewritePartition = TRUE;
+        p_layout->PartitionEntry[0].Mbr.PartitionType = 0x07;
+        p_layout->PartitionEntry[0].Mbr.BootIndicator = TRUE;
+        p_layout->PartitionEntry[0].Mbr.RecognizedPartition = TRUE;
+        p_layout->PartitionEntry[0].Mbr.HiddenSectors = (DWORD)(p1_offset / 512ULL);
+
+        // Partition 2: UEFI:NTFS (MBR type 0xEF)
+        p_layout->PartitionEntry[1].PartitionStyle = PARTITION_STYLE_MBR;
+        p_layout->PartitionEntry[1].StartingOffset.QuadPart = (LONGLONG)p2_offset;
+        p_layout->PartitionEntry[1].PartitionLength.QuadPart = (LONGLONG)p2_length;
+        p_layout->PartitionEntry[1].PartitionNumber = 2;
+        p_layout->PartitionEntry[1].RewritePartition = TRUE;
+        p_layout->PartitionEntry[1].Mbr.PartitionType = 0xEF;
+        p_layout->PartitionEntry[1].Mbr.BootIndicator = FALSE;
+        p_layout->PartitionEntry[1].Mbr.RecognizedPartition = TRUE;
+        p_layout->PartitionEntry[1].Mbr.HiddenSectors = (DWORD)(p2_offset / 512ULL);
+
+        for (int i = 2; i < 4; i++) {
+            p_layout->PartitionEntry[i].RewritePartition = TRUE;
+        }
+    }
+
+    BOOL ok = DeviceIoControl(
+        h_disk,
+        IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+        p_layout,
+        layout_size,
+        NULL,
+        0,
+        &returned,
+        NULL
+    );
+    DWORD ioctl_err = ok ? 0 : GetLastError();
+    free(p_layout);
+    if (!ok) {
+        return (int)(ioctl_err ? ioctl_err : 1);
+    }
+
+    c_flush_disk_buffers(h_disk);
+    c_update_disk_properties(h_disk);
     return 0;
 }
 

@@ -5,8 +5,8 @@ pub mod status_section;
 pub mod style;
 
 pub use dialogs::{
-    show_confirm_dialog, show_file_browser_dialog, show_hash_dialog,
-    show_log_dialog, show_win11_tweaks_dialog,
+    show_about_dialog, show_confirm_dialog, show_download_dialog, show_file_browser_dialog,
+    show_hash_dialog, show_log_dialog, show_settings_dialog,
 };
 pub use drive_properties::render_drive_properties;
 pub use format_options::render_format_options;

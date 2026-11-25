@@ -10,8 +10,7 @@ pub use errors::{Result, UsbXError};
 pub use event::{LogLevel, OperationEvent, OperationResult, OperationStage};
 pub use plan::{ImageInfo, OperationKind, OperationPlan};
 pub use types::{
-    BootSelectionMode, BusType, ClusterSize, FileSystem, FlashTestKind, ImageDetectedType,
-    PartitionScheme, SecureBootStatus, SystemDiskRisk, TargetSystem, Windows11Tweaks,
+    BootSelectionMode, BusType, ClusterSize, CompressedFormat, FileSystem, ImageDetectedType,
+    ImageWriteMode, PartitionScheme, SystemDiskRisk, TargetSystem, ThemePreference,
 };
 pub use validation::validate_plan;
-

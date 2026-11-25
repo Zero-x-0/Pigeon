@@ -74,10 +74,6 @@ fn is_command_available(cmd: &str) -> bool {
             return true;
         }
     }
-    // 3. Fallback: try executing --version
-    if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
-        return output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty();
-    }
     false
 }
 
@@ -226,13 +222,13 @@ pub fn open_file_dialog_ex(title: &str, filter_desc: &str, filter_ext: &str) -> 
                     let t = title.to_string();
                     let cd = clean_desc.clone();
                     let pt = patterns.clone();
-                    move || run_zenity_open(&t, &cd, &pt)
+                    move || run_gtk_cli_open("zenity", &t, &cd, &pt)
                 }),
                 Box::new({
                     let t = title.to_string();
                     let cd = clean_desc.clone();
                     let pt = patterns.clone();
-                    move || run_yad_open(&t, &cd, &pt)
+                    move || run_gtk_cli_open("yad", &t, &cd, &pt)
                 }),
                 Box::new({
                     let t = title.to_string();
@@ -245,52 +241,18 @@ pub fn open_file_dialog_ex(title: &str, filter_desc: &str, filter_ext: &str) -> 
                     move || run_python_tkinter_open(&t)
                 }),
             ],
-            LinuxDesktopEnv::XfceThunar | LinuxDesktopEnv::GnomeNautilus | LinuxDesktopEnv::CinnamonNemo => vec![
+            LinuxDesktopEnv::XfceThunar | LinuxDesktopEnv::GnomeNautilus | LinuxDesktopEnv::CinnamonNemo | LinuxDesktopEnv::Generic => vec![
                 Box::new({
                     let t = title.to_string();
                     let cd = clean_desc.clone();
                     let pt = patterns.clone();
-                    move || run_zenity_open(&t, &cd, &pt)
-                }),
-                Box::new({
-                    let t = title.to_string();
-                    let cd = clean_desc.clone();
-                    let pt = patterns.clone();
-                    move || run_yad_open(&t, &cd, &pt)
+                    move || run_gtk_cli_open("zenity", &t, &cd, &pt)
                 }),
                 Box::new({
                     let t = title.to_string();
                     let cd = clean_desc.clone();
                     let pt = patterns.clone();
-                    move || run_python_gtk_open(&t, &cd, &pt)
-                }),
-                Box::new({
-                    let t = title.to_string();
-                    let kf = kde_filter.clone();
-                    move || run_kdialog_open(&t, &kf)
-                }),
-                Box::new({
-                    let t = title.to_string();
-                    let kf = kde_filter.clone();
-                    move || run_python_qt_open(&t, &kf)
-                }),
-                Box::new({
-                    let t = title.to_string();
-                    move || run_python_tkinter_open(&t)
-                }),
-            ],
-            LinuxDesktopEnv::Generic => vec![
-                Box::new({
-                    let t = title.to_string();
-                    let cd = clean_desc.clone();
-                    let pt = patterns.clone();
-                    move || run_zenity_open(&t, &cd, &pt)
-                }),
-                Box::new({
-                    let t = title.to_string();
-                    let cd = clean_desc.clone();
-                    let pt = patterns.clone();
-                    move || run_yad_open(&t, &cd, &pt)
+                    move || run_gtk_cli_open("yad", &t, &cd, &pt)
                 }),
                 Box::new({
                     let t = title.to_string();
@@ -329,42 +291,11 @@ pub fn open_file_dialog_ex(title: &str, filter_desc: &str, filter_ext: &str) -> 
 }
 
 #[cfg(not(windows))]
-fn run_zenity_open(title: &str, clean_desc: &str, patterns: &str) -> DialogResult {
-    if !is_command_available("zenity") {
+fn run_gtk_cli_open(binary: &str, title: &str, clean_desc: &str, patterns: &str) -> DialogResult {
+    if !is_command_available(binary) {
         return DialogResult::Unsupported;
     }
-    let mut cmd = std::process::Command::new("zenity");
-    configure_cmd_env(&mut cmd);
-    cmd.arg("--file-selection").arg(format!("--title={}", title));
-    if !patterns.is_empty() {
-        cmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
-        cmd.arg("--file-filter=All Files | *");
-    }
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    DialogResult::Selected(path)
-                } else {
-                    DialogResult::Cancelled
-                }
-            } else if output.status.code() == Some(1) {
-                DialogResult::Cancelled
-            } else {
-                DialogResult::Unsupported
-            }
-        }
-        Err(_) => DialogResult::Unsupported,
-    }
-}
-
-#[cfg(not(windows))]
-fn run_yad_open(title: &str, clean_desc: &str, patterns: &str) -> DialogResult {
-    if !is_command_available("yad") {
-        return DialogResult::Unsupported;
-    }
-    let mut cmd = std::process::Command::new("yad");
+    let mut cmd = std::process::Command::new(binary);
     configure_cmd_env(&mut cmd);
     cmd.arg("--file-selection").arg(format!("--title={}", title));
     if !patterns.is_empty() {
@@ -678,9 +609,9 @@ pub fn save_file_dialog(title: &str, default_name: &str, filter_desc: &str, filt
 
         let env = detect_desktop_env();
 
-        let try_zenity = || {
-            if !is_command_available("zenity") { return None; }
-            let mut cmd = std::process::Command::new("zenity");
+        let try_gtk_cli = |binary: &str| {
+            if !is_command_available(binary) { return None; }
+            let mut cmd = std::process::Command::new(binary);
             configure_cmd_env(&mut cmd);
             cmd.arg("--file-selection").arg("--save").arg(format!("--title={}", title));
             if !default_name.is_empty() {
@@ -691,29 +622,6 @@ pub fn save_file_dialog(title: &str, default_name: &str, filter_desc: &str, filt
                 cmd.arg("--file-filter=All Files | *");
             }
             if let Ok(output) = cmd.output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        return Some(path);
-                    }
-                }
-            }
-            None
-        };
-
-        let try_yad = || {
-            if !is_command_available("yad") { return None; }
-            let mut ycmd = std::process::Command::new("yad");
-            configure_cmd_env(&mut ycmd);
-            ycmd.arg("--file-selection").arg("--save").arg(format!("--title={}", title));
-            if !default_name.is_empty() {
-                ycmd.arg(format!("--filename={}", default_name));
-            }
-            if !patterns.is_empty() {
-                ycmd.arg(format!("--file-filter={} | {}", clean_desc, patterns));
-                ycmd.arg("--file-filter=All Files | *");
-            }
-            if let Ok(output) = ycmd.output() {
                 if output.status.success() {
                     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !path.is_empty() {
@@ -876,14 +784,14 @@ try_qt()
             LinuxDesktopEnv::KdeDolphin => {
                 if let Some(p) = try_kdialog() { return Some(p); }
                 if let Some(p) = try_python_qt() { return Some(p); }
-                if let Some(p) = try_zenity() { return Some(p); }
-                if let Some(p) = try_yad() { return Some(p); }
+                if let Some(p) = try_gtk_cli("zenity") { return Some(p); }
+                if let Some(p) = try_gtk_cli("yad") { return Some(p); }
                 if let Some(p) = try_python_gtk() { return Some(p); }
                 try_python_tkinter()
             }
             _ => {
-                if let Some(p) = try_zenity() { return Some(p); }
-                if let Some(p) = try_yad() { return Some(p); }
+                if let Some(p) = try_gtk_cli("zenity") { return Some(p); }
+                if let Some(p) = try_gtk_cli("yad") { return Some(p); }
                 if let Some(p) = try_python_gtk() { return Some(p); }
                 if let Some(p) = try_kdialog() { return Some(p); }
                 if let Some(p) = try_python_qt() { return Some(p); }

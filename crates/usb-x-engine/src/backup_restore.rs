@@ -76,10 +76,16 @@ pub fn execute_backup_drive(
     })?;
 
     let digest = hasher.finalize_hex();
+    let file_name = Path::new(output_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| output_path.to_string());
     let manifest_path = format!("{}.manifest.json", output_path);
     let manifest_content = format!(
-        "{{\n  \"backup_file\": \"{}\",\n  \"total_bytes\": {},\n  \"sha256\": \"{}\"\n}}",
-        output_path, total_bytes, digest
+        "{{\n  \"backup_file\": \"{}\",\n  \"total_bytes\": {},\n  \"sha256\": \"{}\"\n}}\n",
+        file_name.replace('"', "\\\""),
+        total_bytes,
+        digest
     );
 
     let _ = std::fs::write(&manifest_path, manifest_content);
@@ -91,41 +97,4 @@ pub fn execute_backup_drive(
     });
 
     Ok(())
-}
-
-pub fn execute_restore_drive(
-    backend: &mut dyn StorageBackend,
-    target_id: &DeviceId,
-    target_size: u64,
-    backup_path: &str,
-    verify: bool,
-    sender: &Sender<OperationEvent>,
-    cancelled: &Arc<AtomicBool>,
-) -> Result<()> {
-    let path = Path::new(backup_path);
-    let file = File::open(path).map_err(|e| UsbXError::Io {
-        operation: "open_backup_for_restore".to_string(),
-        message: e.to_string(),
-    })?;
-
-    let backup_size = file.metadata().map_err(|e| UsbXError::Io {
-        operation: "metadata".to_string(),
-        message: e.to_string(),
-    })?.len();
-
-    if backup_size > target_size {
-        return Err(UsbXError::SafetyViolation(format!(
-            "Backup image size ({} bytes) is larger than target device ({} bytes)",
-            backup_size, target_size
-        )));
-    }
-
-    crate::raw_writer::execute_raw_write(
-        backend,
-        target_id,
-        backup_path,
-        verify,
-        sender,
-        cancelled,
-    )
 }

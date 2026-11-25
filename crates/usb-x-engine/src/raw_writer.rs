@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -8,8 +9,23 @@ use std::time::Instant;
 use usb_x_core::device::DeviceId;
 use usb_x_core::errors::{Result, UsbXError};
 use usb_x_core::event::{LogLevel, OperationEvent, OperationStage};
+use usb_x_core::types::CompressedFormat;
 use usb_x_image::hash::Sha256;
 use usb_x_platform::StorageBackend;
+
+/// Fill `buf` completely (up to EOF) so streamed pipe reads align cleanly with 512-byte sectors.
+fn read_full_chunk(reader: &mut dyn Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
 
 pub fn execute_raw_write(
     backend: &mut dyn StorageBackend,
@@ -19,36 +35,72 @@ pub fn execute_raw_write(
     sender: &Sender<OperationEvent>,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<()> {
+    let comp_fmt = CompressedFormat::from_path(source_path);
     let path = Path::new(source_path);
-    let mut file = File::open(path).map_err(|e| UsbXError::Io {
-        operation: "open_image_file".to_string(),
-        message: e.to_string(),
-    })?;
 
-    let total_bytes = file.metadata().map_err(|e| UsbXError::Io {
-        operation: "file_metadata".to_string(),
-        message: e.to_string(),
-    })?.len();
+    let mut child_opt = None;
+    let (mut reader, total_bytes_opt): (Box<dyn Read>, Option<u64>) = if let Some(fmt) = comp_fmt {
+        let tool = fmt.tool_name();
+        let _ = sender.send(OperationEvent::Log {
+            level: LogLevel::Info,
+            timestamp: "Now".to_string(),
+            message: format!("Decompressing {} stream via {} on-the-fly...", fmt.label(), tool),
+        });
+        let mut child = Command::new(tool)
+            .args(&["-dc", source_path])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| UsbXError::Io {
+                operation: format!("spawn_{}", tool),
+                message: format!("Failed to start {} for compressed image: {}", tool, e),
+            })?;
+        let stdout = child.stdout.take().ok_or_else(|| UsbXError::Io {
+            operation: "decompressor_stdout".to_string(),
+            message: format!("{} did not provide stdout pipe", tool),
+        })?;
+        child_opt = Some((tool, child));
+        (Box::new(stdout), None)
+    } else {
+        let file = File::open(path).map_err(|e| UsbXError::Io {
+            operation: "open_image_file".to_string(),
+            message: e.to_string(),
+        })?;
+        let len = file
+            .metadata()
+            .map_err(|e| UsbXError::Io {
+                operation: "file_metadata".to_string(),
+                message: e.to_string(),
+            })?
+            .len();
+        (Box::new(file), Some(len))
+    };
 
     let _ = sender.send(OperationEvent::StageChanged {
         stage: OperationStage::WritingImage,
-        message: format!("Writing image data: 0 / {} bytes", total_bytes),
+        message: match total_bytes_opt {
+            Some(tot) => format!("Writing image data: 0 / {} bytes", tot),
+            None => "Streaming decompressed image data...".to_string(),
+        },
     });
 
-    let chunk_size = 1024 * 1024; // 1 MiB chunk
+    let chunk_size = 4 * 1024 * 1024; // 4 MiB streaming chunk
     let mut buffer = vec![0u8; chunk_size];
     let mut written: u64 = 0;
     let start_time = Instant::now();
     let mut last_progress_time = Instant::now();
-
     let mut write_hasher = Sha256::new();
 
     loop {
         if cancelled.load(Ordering::Relaxed) {
+            if let Some((_, mut child)) = child_opt.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             return Err(UsbXError::Cancelled("Write cancelled by user".to_string()));
         }
 
-        let bytes_read = file.read(&mut buffer).map_err(|e| UsbXError::Io {
+        let bytes_read = read_full_chunk(&mut *reader, &mut buffer).map_err(|e| UsbXError::Io {
             operation: "read_source_image".to_string(),
             message: e.to_string(),
         })?;
@@ -63,7 +115,7 @@ pub fn execute_raw_write(
         backend.write_sectors(target_id, written, chunk)?;
         written += bytes_read as u64;
 
-        if last_progress_time.elapsed().as_millis() >= 100 || written == total_bytes {
+        if last_progress_time.elapsed().as_millis() >= 100 || Some(written) == total_bytes_opt {
             let elapsed_sec = start_time.elapsed().as_secs_f64();
             let bytes_per_sec = if elapsed_sec > 0.0 {
                 (written as f64 / elapsed_sec) as u64
@@ -71,21 +123,33 @@ pub fn execute_raw_write(
                 0
             };
 
-            let remaining_bytes = total_bytes.saturating_sub(written);
-            let eta = if bytes_per_sec > 0 {
-                Some(remaining_bytes / bytes_per_sec)
-            } else {
-                None
-            };
+            let eta = total_bytes_opt.and_then(|tot| {
+                let remaining = tot.saturating_sub(written);
+                if bytes_per_sec > 0 { Some(remaining / bytes_per_sec) } else { None }
+            });
 
             let _ = sender.send(OperationEvent::Progress {
                 completed_bytes: written,
-                total_bytes: Some(total_bytes),
+                total_bytes: total_bytes_opt,
                 bytes_per_second: Some(bytes_per_sec),
                 eta_seconds: eta,
             });
 
             last_progress_time = Instant::now();
+        }
+    }
+
+    drop(reader);
+    if let Some((tool, mut child)) = child_opt.take() {
+        let status = child.wait().map_err(|e| UsbXError::Io {
+            operation: "wait_decompressor".to_string(),
+            message: e.to_string(),
+        })?;
+        if !status.success() {
+            return Err(UsbXError::Io {
+                operation: format!("decompress_{}", tool),
+                message: format!("{} exited with error status while decompressing '{}'", tool, source_path),
+            });
         }
     }
 
@@ -99,7 +163,7 @@ pub fn execute_raw_write(
     let _ = sender.send(OperationEvent::Log {
         level: LogLevel::Info,
         timestamp: "Now".to_string(),
-        message: format!("Write complete ({} bytes). Source SHA256: {}", written, source_sha256),
+        message: format!("Write complete ({} bytes). SHA256: {}", written, source_sha256),
     });
 
     if verify {
@@ -177,14 +241,13 @@ mod tests {
             &mut vdisk,
             &target_id,
             &src_file.to_string_lossy(),
-            true, // verify sha256
+            true,
             &tx,
             &cancelled,
         );
 
         assert!(res.is_ok());
 
-        // Drain events to verify completion
         let mut got_pass = false;
         while let Ok(evt) = rx.try_recv() {
             if let OperationEvent::Log { message, .. } = evt {
@@ -196,6 +259,30 @@ mod tests {
         assert!(got_pass);
 
         let _ = std::fs::remove_file(src_file);
+        let _ = std::fs::remove_file(vdisk_file);
+    }
+
+    #[test]
+    fn test_compressed_gzip_stream_write_and_verify() {
+        let gz_file = std::env::temp_dir().join(format!("pigeon_gz_src_{}.img.gz", std::process::id()));
+        let raw_tmp = std::env::temp_dir().join(format!("pigeon_gz_src_{}.img", std::process::id()));
+        let vdisk_file = std::env::temp_dir().join(format!("pigeon_gz_dst_{}.img", std::process::id()));
+
+        let test_payload = vec![0x37u8; 32 * 1024];
+        std::fs::write(&raw_tmp, &test_payload).unwrap();
+        let status = Command::new("gzip").args(&["-f", "-k", &raw_tmp.to_string_lossy()]).status();
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) && gz_file.exists() {
+            let _ = std::fs::remove_file(&vdisk_file);
+            let mut vdisk = VirtualDriveBackend::open_or_create(&vdisk_file.to_string_lossy(), 64 * 1024).unwrap();
+            let target_id = vdisk.enumerate_devices().unwrap()[0].id.clone();
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let res = execute_raw_write(&mut vdisk, &target_id, &gz_file.to_string_lossy(), true, &tx, &cancelled);
+            assert!(res.is_ok());
+        }
+
+        let _ = std::fs::remove_file(raw_tmp);
+        let _ = std::fs::remove_file(gz_file);
         let _ = std::fs::remove_file(vdisk_file);
     }
 }

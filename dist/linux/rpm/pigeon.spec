@@ -1,15 +1,15 @@
 Name:           pigeon
-Version:        1.11.0
+Version:        1.11.26
 Release:        1%{?dist}
-Summary:        Next-Generation bootable USB drive creator
+Summary:        Fast, lightweight bootable USB creator & disk imager
 License:        GPL-3.0-or-later
-URL:            https://github.com/pigeon-usb/pigeon
+URL:            https://github.com/Zero-x-0/Pigeon
 BuildArch:      x86_64
 
 %description
-Fast and reliable bootable USB formatting and image flasher,
-supporting Windows 10/11 with autounattend bypass, Linux
-ISOHybrid, and raw disk images.
+High-performance bootable USB formatting and image flasher supporting
+Rufus-style single-pass UEFI:NTFS Windows Setup, Linux ISOHybrid with
+persistence, and compressed or raw DD disk streaming.
 
 %install
 mkdir -p %{buildroot}/usr/bin
@@ -25,6 +25,5 @@ install -m 644 %{_sourcedir}/pigeon.png %{buildroot}/usr/share/pixmaps/pigeon.pn
 /usr/share/pixmaps/pigeon.png
 
 %changelog
-* Mon Nov 09 2026 Pigeon Team <support@pigeon-usb.org> - 1.0.0-1
-- Version 1.0 release of Pigeon
-
+* Thu Nov 26 2026 Pigeon Team <support@pigeon-usb.org> - 1.11.26-1
+- Release 1.11.26 with Rufus-style UEFI:NTFS single-pass extraction, auto-resizing window, and live Light/Dark theme switching.

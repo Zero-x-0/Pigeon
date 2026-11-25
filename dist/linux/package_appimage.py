@@ -22,6 +22,9 @@ trap cleanup EXIT INT TERM
 # Find offset of archive payload
 PAYLOAD_OFFSET=$(awk '/^__PAYLOAD_BELOW__/ {print NR + 1; exit 0; }' "$0")
 
+# Export APPIMAGE path (standard AppImage environment contract)
+export APPIMAGE="$(readlink -f "${ARGV0:-$0}")"
+
 # Extract archive
 tail -n +"$PAYLOAD_OFFSET" "$0" | tar -xz -C "$TMP_DIR"
 
@@ -104,13 +107,24 @@ def build_appimage(output_path, bin_path, desktop_path, apprun_path, icon_path):
 
     print(f"Created AppImage: {output_path} ({os.path.getsize(output_path)} bytes)")
 
+def read_workspace_version(root_dir):
+    import re
+    cargo_toml = os.path.join(root_dir, "Cargo.toml")
+    if os.path.exists(cargo_toml):
+        with open(cargo_toml, 'r', encoding='utf-8') as f:
+            m = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.MULTILINE)
+            if m:
+                return m.group(1)
+    return "1.11.26"
+
 if __name__ == "__main__":
     dir_path = os.path.dirname(os.path.abspath(__file__))
     root_dir = os.path.abspath(os.path.join(dir_path, "../.."))
+    version = read_workspace_version(root_dir)
     desktop_file = os.path.join(dir_path, "pigeon.desktop")
     apprun_file = os.path.join(dir_path, "appimage/AppRun")
     icon_file = os.path.join(root_dir, "assets/pigeon.png")
-    out_appimage = os.path.join(dir_path, "Pigeon-1.11.0-x86_64.AppImage")
+    out_appimage = os.path.join(dir_path, f"Pigeon-{version}-x86_64.AppImage")
 
     candidate_bins = [
         os.path.join(root_dir, "target/linux/release/pigeon"),

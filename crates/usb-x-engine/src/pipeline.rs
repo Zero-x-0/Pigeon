@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -5,6 +6,7 @@ use usb_x_core::device::DeviceInfo;
 use usb_x_core::errors::{Result, UsbXError};
 use usb_x_core::event::{LogLevel, OperationEvent, OperationResult, OperationStage};
 use usb_x_core::plan::{OperationKind, OperationPlan};
+use usb_x_core::types::{ClusterSize, FileSystem, ImageWriteMode, PartitionScheme};
 use usb_x_core::validation::validate_plan;
 use usb_x_platform::StorageBackend;
 
@@ -52,6 +54,56 @@ pub fn execute_operation_pipeline(
     }
 }
 
+fn format_cluster_opt(cluster_size: ClusterSize) -> Option<u32> {
+    match cluster_size {
+        ClusterSize::Default => None,
+        other => Some(other.to_bytes()),
+    }
+}
+
+/// Write a safe `[Autorun]` extended label file (`autorun.inf`) when enabled and not already present.
+fn write_extended_label_if_enabled(
+    target_root: &str,
+    extended_label: bool,
+    volume_label: &str,
+    sender: &Sender<OperationEvent>,
+) {
+    if !extended_label || volume_label.trim().is_empty() {
+        return;
+    }
+    let root = Path::new(target_root);
+    let has_autorun = std::fs::read_dir(root)
+        .ok()
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("autorun.inf"))
+        })
+        .unwrap_or(false);
+    if has_autorun {
+        return;
+    }
+
+    let safe_label: String = volume_label
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if safe_label.is_empty() {
+        return;
+    }
+
+    let content = format!("[Autorun]\r\nLabel={}\r\n", safe_label);
+    let dest = root.join("autorun.inf");
+    if std::fs::write(&dest, content).is_ok() {
+        let _ = sender.send(OperationEvent::Log {
+            level: LogLevel::Info,
+            timestamp: "Now".to_string(),
+            message: format!("Created extended volume label file ({})", dest.display()),
+        });
+    }
+}
+
 fn run_pipeline(
     backend: &mut dyn StorageBackend,
     plan: &OperationPlan,
@@ -86,27 +138,31 @@ fn run_pipeline(
             partition_scheme,
             target_system,
             file_system,
+            cluster_size,
+            volume_label,
+            quick_format,
+            extended_label,
             verify_after_write,
-            win11_tweaks,
+            check_bad_blocks_passes,
             linux_persistence_mb,
             write_mode,
+            old_bios_fixes,
+            rufus_mbr_bios_id,
         } => {
-            #[allow(unused_variables)]
-            let is_windows = matches!(
-                image.detected_type,
-                usb_x_core::types::ImageDetectedType::Windows11Installer { .. }
-                | usb_x_core::types::ImageDetectedType::Windows10Installer { .. }
-                | usb_x_core::types::ImageDetectedType::WindowsLegacy { .. }
-            );
+            if let Some(passes) = check_bad_blocks_passes {
+                crate::flash_test::execute_bad_blocks_check(
+                    backend,
+                    &device.id,
+                    device.size_bytes,
+                    *passes,
+                    sender,
+                    cancelled,
+                )?;
+                let _ = backend.unmount_and_lock(&device.id);
+            }
 
-            // Determine write strategy:
-            // - DdImageMode: stream raw byte-for-byte to Sector 0 (Raw disk copy)
-            // - IsoImageMode: format full partition (no unallocated space) and extract bootable files
-            let use_dd_mode = match write_mode {
-                usb_x_core::types::ImageWriteMode::DdImageMode => true,
-                usb_x_core::types::ImageWriteMode::IsoImageMode => false,
-                usb_x_core::types::ImageWriteMode::Auto => false,
-            };
+            let is_windows = image.is_windows();
+            let use_dd_mode = *write_mode == ImageWriteMode::DdImageMode || image.is_raw_disk_image();
 
             let _ = sender.send(OperationEvent::Log {
                 level: LogLevel::Info,
@@ -114,7 +170,7 @@ fn run_pipeline(
                 message: format!(
                     "Writing image '{}' [Mode: {}] · Partition: {} · Target: {} · FS: {}",
                     image.path,
-                    if use_dd_mode { "DD Raw Sector Stream" } else { "ISO Bootable Filesystem Mode" },
+                    if use_dd_mode { "DD Image Mode" } else { "ISO Image Mode" },
                     partition_scheme.label(),
                     target_system.label(),
                     file_system.label()
@@ -155,10 +211,9 @@ fn run_pipeline(
                 .and_then(|s| s.parse::<u32>().ok());
 
             if use_dd_mode {
-                // Stream raw sectors starting at Sector 0:
                 let _ = sender.send(OperationEvent::StageChanged {
                     stage: OperationStage::WritingImage,
-                    message: "Writing raw DD sectors to Sector 0 (GRUB / UEFI ESP / MBR)...".to_string(),
+                    message: "Writing raw image sectors starting at Sector 0...".to_string(),
                 });
 
                 crate::raw_writer::execute_raw_write(
@@ -173,505 +228,550 @@ fn run_pipeline(
                 let _ = sender.send(OperationEvent::Log {
                     level: LogLevel::Info,
                     timestamp: "Now".to_string(),
-                    message: "DD raw write finished: Sector 0 MBR, GRUB bootloader, and EFI System Partition are live.".to_string(),
+                    message: "DD image write finished: Sector 0 partition table and boot sectors are live.".to_string(),
                 });
 
                 #[cfg(windows)]
-                {
-                    if let Some(letter) = orig_letter {
-                        usb_x_platform::notify_drive_ready(&format!("{}:\\", letter));
-                    }
+                if let Some(letter) = orig_letter {
+                    usb_x_platform::notify_drive_ready(&format!("{}:\\", letter));
                 }
             } else {
-                // ISO Image Mode: Clean bootable filesystem extraction for both Windows and Linux!
-                let raw_label = image.volume_label.clone().unwrap_or_else(|| "USB_BOOT".to_string());
-                let vol_label = if matches!(file_system, usb_x_core::types::FileSystem::Fat32) {
-                    if raw_label.len() > 11 {
-                        raw_label[..11].to_uppercase()
-                    } else {
-                        raw_label.to_uppercase()
-                    }
+                let raw_label = if !volume_label.trim().is_empty() {
+                    volume_label.trim().to_string()
                 } else {
-                    raw_label
+                    image.volume_label.clone().unwrap_or_else(|| "USB_BOOT".to_string())
+                };
+                let effective_label = if matches!(file_system, FileSystem::Fat32) {
+                    let fat_clean: String = raw_label
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                        .take(11)
+                        .collect();
+                    if fat_clean.is_empty() { "USB_BOOT".to_string() } else { fat_clean.to_uppercase() }
+                } else {
+                    raw_label.clone()
                 };
 
-                let fs_str = match file_system {
-                    usb_x_core::types::FileSystem::Fat32 => "FAT32",
-                    usb_x_core::types::FileSystem::Ntfs => "NTFS",
-                    usb_x_core::types::FileSystem::ExFat => "exFAT",
-                    _ => "FAT32",
-                };
+                let fs_str = file_system.as_str();
+                let cluster_bytes_opt = format_cluster_opt(*cluster_size);
 
-                #[cfg(windows)]
-                let mut target_mp: Option<String> = None;
-
-                #[cfg(windows)]
-                if let Some(letter) = orig_letter {
-                    let test_p = format!("{}:\\", letter);
-                    if std::path::Path::new(&test_p).exists() {
-                        target_mp = Some(test_p);
-                    }
-                }
-
-                #[cfg(windows)]
-                if target_mp.is_none() {
-                    if let Some(disk_num) = disk_num_opt {
-                        let vols = usb_x_platform::get_volumes_for_disk(disk_num);
-                        if let Some(v) = vols.first() {
-                            let test_p = format!("{}:\\", v.drive_letter);
-                            if std::path::Path::new(&test_p).exists() {
-                                target_mp = Some(test_p);
-                            }
-                        }
-                    }
-                }
-
-                // 2. Format volume or recreate healthy partition if the drive is unallocated or multi-partitioned
                 #[allow(unused_assignments)]
                 let mut mp_final = String::new();
 
                 #[cfg(windows)]
                 {
-                    let is_fat32 = matches!(file_system, usb_x_core::types::FileSystem::Fat32);
-                    #[allow(unused_mut)]
-            let mut has_multiple_partitions = device.partitions.len() > 1;
+                    let _ = (cluster_bytes_opt, target_system, old_bios_fixes, rufus_mbr_bios_id, linux_persistence_mb);
+                    let req_fat32 = matches!(file_system, FileSystem::Fat32);
+                    let is_gpt = matches!(partition_scheme, PartitionScheme::Gpt);
 
-                    if let Some(disk_num) = disk_num_opt {
-                        if disk_num != 0 {
-                            let vols = usb_x_platform::get_volumes_for_disk(disk_num);
-                            if vols.len() > 1 {
-                                has_multiple_partitions = true;
-                            }
-                        }
-                    }
+                    let _ = sender.send(OperationEvent::StageChanged {
+                        stage: OperationStage::WritingImage,
+                        message: "Mounting source ISO image virtually...".to_string(),
+                    });
+                    let iso_mount = usb_x_platform::mount_iso_virtdisk(&image.path)?;
+                    let source_root = iso_mount.drive_root.clone();
+                    let _ = sender.send(OperationEvent::Log {
+                        level: LogLevel::Info,
+                        timestamp: "Now".to_string(),
+                        message: format!("Mounted source ISO to virtual drive {}", source_root),
+                    });
 
-                    if has_multiple_partitions {
-                        // User requirement: "if usb have multipal partions so delete all partions and recreate partions and formate then start wrighting image"
-                        if let Some(disk_num) = disk_num_opt {
-                            if disk_num != 0 {
-                                let _ = sender.send(OperationEvent::StageChanged {
-                                    stage: OperationStage::Partitioning,
-                                    message: format!("Multiple partitions detected on PhysicalDrive{}. Deleting all partitions...", disk_num),
-                                });
-                                let _ = sender.send(OperationEvent::Log {
-                                    level: LogLevel::Info,
-                                    timestamp: "Now".to_string(),
-                                    message: format!(
-                                        "Cleaning PhysicalDrive{}: wiping all old partitions (MBR/GPT) and recreating single 100% capacity partition...",
-                                        disk_num
-                                    ),
-                                });
+                    let iso_summary = crate::iso_extractor::inspect_mounted_iso(&source_root);
+                    let is_win_effective = is_windows || iso_summary.has_windows_setup;
+                    let use_windows_dual_part = is_win_effective && (!req_fat32 || iso_summary.has_file_over_4gb);
 
-                                let clean_res = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, is_fat32);
-                                if let Err(err) = clean_res {
-                                    let _ = sender.send(OperationEvent::Log {
-                                        level: LogLevel::Warn,
-                                        timestamp: "Now".to_string(),
-                                        message: format!("Partition wipe notice: {}", err),
-                                    });
-                                }
+                    if use_windows_dual_part {
+                        const UEFI_NTFS_IMG: &[u8] = include_bytes!("../assets/uefi-ntfs.img");
+                        let disk_num = disk_num_opt.filter(|&n| n != 0).ok_or_else(|| UsbXError::Io {
+                            operation: "resolve_physical_drive".to_string(),
+                            message: "Valid target PhysicalDrive number required for UEFI:NTFS layout.".to_string(),
+                        })?;
 
-                                // Wait for Windows PnP MountMgr to mount and assign a drive letter to the new partition
-                                if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
-                                    let _ = sender.send(OperationEvent::StageChanged {
-                                        stage: OperationStage::Formatting,
-                                        message: format!("Formatting clean partition {} as {} ({}) via native Win32 FormatEx...", cand, fs_str, vol_label),
-                                    });
-                                    let _ = usb_x_platform::format_drive_volume(&cand, fs_str, &vol_label, true, 0);
-                                    mp_final = cand.clone();
-                                    usb_x_platform::notify_drive_ready(&cand);
-                                }
-                            }
-                        }
-                    }
+                        let _ = sender.send(OperationEvent::StageChanged {
+                            stage: OperationStage::Partitioning,
+                            message: format!(
+                                "Partitioning PhysicalDrive{} (NTFS + UEFI:NTFS, {})...",
+                                disk_num,
+                                if is_gpt { "GPT" } else { "MBR" }
+                            ),
+                        });
+                        usb_x_platform::create_windows_uefi_ntfs_layout(
+                            disk_num,
+                            device.size_bytes,
+                            is_gpt,
+                            UEFI_NTFS_IMG,
+                        )?;
+                        let _ = sender.send(OperationEvent::Log {
+                            level: LogLevel::Info,
+                            timestamp: "Now".to_string(),
+                            message: format!(
+                                "Created NTFS + UEFI:NTFS layout on PhysicalDrive{} (wrote {:.1} MB uefi-ntfs.img)",
+                                disk_num,
+                                UEFI_NTFS_IMG.len() as f64 / (1024.0 * 1024.0)
+                            ),
+                        });
 
-                    if mp_final.is_empty() {
-                        // Single healthy partition path or fallback
-                        if let Some(ref mp) = target_mp {
-                            let _ = sender.send(OperationEvent::StageChanged {
-                                stage: OperationStage::Formatting,
-                                message: format!("Formatting partition {} as {} ({}) via native Win32 FormatEx...", mp, fs_str, vol_label),
-                            });
-                            let fmt_res = usb_x_platform::format_drive_volume(mp, fs_str, &vol_label, true, 0);
-                            mp_final = mp.clone();
-                            usb_x_platform::notify_drive_ready(&mp_final);
-                            if let Err(err) = fmt_res {
-                                let _ = sender.send(OperationEvent::Log {
-                                    level: LogLevel::Warn,
-                                    timestamp: "Now".to_string(),
-                                    message: format!("Format notice (continuing with volume {}): {}", mp, err),
-                                });
-                            }
-                        }
-                    }
+                        let p1_mp = usb_x_platform::wait_for_partition_volume_ready(disk_num, 1, 10_000)
+                            .ok_or_else(|| UsbXError::Io {
+                                operation: "wait_for_ntfs_volume".to_string(),
+                                message: format!("Partition 1 on PhysicalDrive{} did not receive a drive letter.", disk_num),
+                            })?;
 
-                    if mp_final.is_empty() {
-                        // Volume does not exist (e.g. drive was in unallocated space). Recreate primary MBR partition natively!
-                        if let Some(disk_num) = disk_num_opt {
-                            if disk_num != 0 {
-                                let _ = sender.send(OperationEvent::StageChanged {
-                                    stage: OperationStage::Partitioning,
-                                    message: format!("Creating native MBR partition on PhysicalDrive{} (100% capacity)...", disk_num),
-                                });
+                        let _ = sender.send(OperationEvent::StageChanged {
+                            stage: OperationStage::Formatting,
+                            message: format!("Formatting {} as NTFS ({})...", p1_mp, raw_label),
+                        });
+                        usb_x_platform::format_drive_volume(
+                            &p1_mp,
+                            "NTFS",
+                            &raw_label,
+                            *quick_format,
+                            cluster_size.to_bytes(),
+                        )?;
+                        mp_final = p1_mp.clone();
+                        usb_x_platform::notify_drive_ready(&mp_final);
 
-                                let _ = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, is_fat32);
-
-                                if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
-                                    let _ = sender.send(OperationEvent::StageChanged {
-                                        stage: OperationStage::Formatting,
-                                        message: format!("Formatting partition {} as {} ({}) via native Win32 FormatEx...", cand, fs_str, vol_label),
-                                    });
-                                    let _ = usb_x_platform::format_drive_volume(&cand, fs_str, &vol_label, true, 0);
-                                    mp_final = cand.clone();
-                                    usb_x_platform::notify_drive_ready(&cand);
-                                } else if let Some(letter) = orig_letter {
-                                    let cand = format!("{}:\\", letter);
-                                    if std::path::Path::new(&cand).exists() {
-                                        let _ = usb_x_platform::format_drive_volume(&cand, fs_str, &vol_label, true, 0);
-                                        mp_final = cand.clone();
-                                        usb_x_platform::notify_drive_ready(&cand);
+                        crate::iso_extractor::copy_mounted_iso_to_target(&source_root, &mp_final, false, sender, cancelled)?;
+                        write_extended_label_if_enabled(&mp_final, *extended_label, &raw_label, sender);
+                        crate::iso_extractor::ensure_uefi_boot_fallback(&mp_final, sender);
+                        usb_x_platform::notify_drive_ready(&mp_final);
+                    } else {
+                        let mut target_mp: Option<String> = orig_letter.and_then(|letter| {
+                            let p = format!("{}:\\", letter);
+                            if Path::new(&p).exists() { Some(p) } else { None }
+                        });
+                        if target_mp.is_none() {
+                            if let Some(disk_num) = disk_num_opt {
+                                if let Some(v) = usb_x_platform::get_volumes_for_disk(disk_num).first() {
+                                    let p = format!("{}:\\", v.drive_letter);
+                                    if Path::new(&p).exists() {
+                                        target_mp = Some(p);
                                     }
                                 }
                             }
                         }
-                    }
-                }
 
-                #[cfg(target_os = "linux")]
-                let mut _linux_target_guard: Option<usb_x_platform::linux::LinuxMountGuard> = None;
+                        let mut has_multiple_partitions = device.partitions.len() > 1;
+                        if let Some(disk_num) = disk_num_opt {
+                            if disk_num != 0 && usb_x_platform::get_volumes_for_disk(disk_num).len() > 1 {
+                                has_multiple_partitions = true;
+                            }
+                        }
+
+                        if has_multiple_partitions {
+                            if let Some(disk_num) = disk_num_opt.filter(|&n| n != 0) {
+                                let _ = sender.send(OperationEvent::StageChanged {
+                                    stage: OperationStage::Partitioning,
+                                    message: format!("Wiping old partitions on PhysicalDrive{}...", disk_num),
+                                });
+                                let _ = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, req_fat32);
+                                if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
+                                    let _ = usb_x_platform::format_drive_volume(&cand, fs_str, &effective_label, *quick_format, cluster_size.to_bytes());
+                                    mp_final = cand.clone();
+                                    usb_x_platform::notify_drive_ready(&cand);
+                                }
+                            }
+                        } else if let Some(ref mp) = target_mp {
+                            let _ = sender.send(OperationEvent::StageChanged {
+                                stage: OperationStage::Formatting,
+                                message: format!("Formatting {} as {}...", mp, fs_str),
+                            });
+                            let _ = usb_x_platform::format_drive_volume(mp, fs_str, &effective_label, *quick_format, cluster_size.to_bytes());
+                            mp_final = mp.clone();
+                            usb_x_platform::notify_drive_ready(&mp_final);
+                        }
+
+                        if mp_final.is_empty() {
+                            if let Some(disk_num) = disk_num_opt.filter(|&n| n != 0) {
+                                let _ = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, req_fat32);
+                                if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
+                                    let _ = usb_x_platform::format_drive_volume(&cand, fs_str, &effective_label, *quick_format, cluster_size.to_bytes());
+                                    mp_final = cand.clone();
+                                    usb_x_platform::notify_drive_ready(&cand);
+                                }
+                            }
+                        }
+
+                        if mp_final.is_empty() {
+                            return Err(UsbXError::Io {
+                                operation: "prepare_target_volume".to_string(),
+                                message: "Target volume could not be mounted.".to_string(),
+                            });
+                        }
+
+                        crate::iso_extractor::copy_mounted_iso_to_target(&source_root, &mp_final, req_fat32, sender, cancelled)?;
+                        write_extended_label_if_enabled(&mp_final, *extended_label, &raw_label, sender);
+                        crate::iso_extractor::ensure_uefi_boot_fallback(&mp_final, sender);
+                        usb_x_platform::notify_drive_ready(&mp_final);
+                    }
+
+                    drop(iso_mount);
+                    let _ = sender.send(OperationEvent::Log {
+                        level: LogLevel::Info,
+                        timestamp: "Now".to_string(),
+                        message: format!("Dismounted virtual drive {}", source_root),
+                    });
+                }
 
                 #[cfg(target_os = "linux")]
                 {
                     let dev_node = device.id.as_str();
-                    let is_gpt = matches!(partition_scheme, usb_x_core::types::PartitionScheme::Gpt);
-                    let is_fat32 = matches!(file_system, usb_x_core::types::FileSystem::Fat32);
+                    let is_gpt = matches!(partition_scheme, PartitionScheme::Gpt);
+                    let req_fat32 = matches!(file_system, FileSystem::Fat32);
 
                     let _ = sender.send(OperationEvent::StageChanged {
-                        stage: OperationStage::Partitioning,
-                        message: format!("Partitioning {} (100% capacity, {})...", dev_node, if is_gpt { "GPT" } else { "MBR" }),
+                        stage: OperationStage::WritingImage,
+                        message: "Mounting source ISO image natively...".to_string(),
+                    });
+                    let iso_mount = usb_x_platform::linux::mount_iso(&image.path)?;
+                    let source_root = iso_mount.mount_point.to_string_lossy().to_string();
+                    let _ = sender.send(OperationEvent::Log {
+                        level: LogLevel::Info,
+                        timestamp: "Now".to_string(),
+                        message: format!("Mounted source ISO to {}", source_root),
                     });
 
-                    // 1. Unmount existing partitions on target device
+                    let iso_summary = crate::iso_extractor::inspect_mounted_iso(&source_root);
+                    let is_win_effective = is_windows || iso_summary.has_windows_setup;
+
+                    // Dual-partition NTFS Data + 1 MiB UEFI:NTFS (`uefi-ntfs.img`) single-pass extraction (matching Rufus)
+                    let use_windows_dual_part = is_win_effective && (!req_fat32 || iso_summary.has_file_over_4gb);
+
                     let _ = backend.unmount_and_lock(&device.id);
 
-                    // 2. Partition target device
-                    let part_dev = usb_x_platform::linux::create_partition_on_disk(dev_node, is_gpt, is_fat32)?;
+                    if use_windows_dual_part {
+                        const UEFI_NTFS_IMG: &[u8] = include_bytes!("../assets/uefi-ntfs.img");
 
-                    let _ = sender.send(OperationEvent::Log {
-                        level: LogLevel::Info,
-                        timestamp: "Now".to_string(),
-                        message: format!("Created partition {} on {}", part_dev, dev_node),
-                    });
-
-                    // 3. Format partition
-                    let _ = sender.send(OperationEvent::StageChanged {
-                        stage: OperationStage::Formatting,
-                        message: format!("Formatting partition {} as {} ({})...", part_dev, fs_str, vol_label),
-                    });
-                    usb_x_platform::linux::format_partition_volume(&part_dev, fs_str, &vol_label)?;
-
-                    // 4. Mount partition to temporary directory
-                    let target_guard = usb_x_platform::linux::mount_volume(&part_dev)?;
-                    mp_final = target_guard.mount_point.to_string_lossy().to_string();
-                    _linux_target_guard = Some(target_guard);
-                }
-
-                if mp_final.is_empty() {
-                    return Err(UsbXError::Io {
-                        operation: "prepare_target_volume".to_string(),
-                        message: "Target volume could not be accessed. Please ensure the USB drive is connected and has a valid drive letter.".to_string(),
-                    });
-                }
-
-                let _ = sender.send(OperationEvent::Log {
-                    level: LogLevel::Info,
-                    timestamp: "Now".to_string(),
-                    message: format!("Target drive ready for writing: {}", mp_final),
-                });
-
-                // 3. Extract all ISO files (Windows or Linux)
-                let is_fat32 = matches!(file_system, usb_x_core::types::FileSystem::Fat32);
-                crate::iso_extractor::extract_iso_to_target(&image.path, &mp_final, is_fat32, sender, cancelled)?;
-
-                // 4. If Windows 11 tweaks are active, generate autounattend.xml
-                if let Some(tweaks) = win11_tweaks {
-                    if tweaks.bypass_tpm_secure_boot_ram || tweaks.bypass_online_account || tweaks.disable_telemetry_privacy {
                         let _ = sender.send(OperationEvent::StageChanged {
-                            stage: OperationStage::ApplyingTweaks,
-                            message: "Applying Windows 11 Setup tweaks (TPM/SecureBoot/RAM bypass, offline account)...".to_string(),
-                        });
-                        let arch_hint = image.architecture.as_deref().unwrap_or("amd64");
-                        let xml = usb_x_image::generate_autounattend_xml_with_arch(tweaks, arch_hint);
-                        let dest = std::path::Path::new(&mp_final).join("autounattend.xml");
-                        if let Ok(_) = std::fs::write(&dest, &xml) {
-                            let _ = sender.send(OperationEvent::Log {
-                                level: LogLevel::Info,
-                                timestamp: "Now".to_string(),
-                                message: format!("Installed autounattend.xml to {}", dest.display()),
-                            });
-                        }
-                    }
-                }
-
-                // 5. Make drive bootable
-                #[cfg(windows)]
-                {
-                    let mp_clean = mp_final.trim_end_matches(['\\', '/']);
-                    let boot_drive = if mp_clean.ends_with(':') {
-                        mp_clean.to_string()
-                    } else {
-                        format!("{}:", mp_clean)
-                    };
-
-                    // If Windows image or BIOS target, install Windows BOOTMGR bootcode
-                    if is_windows || *target_system == usb_x_core::types::TargetSystem::Bios {
-                        let _ = sender.send(OperationEvent::StageChanged {
-                            stage: OperationStage::FlushingBuffers,
-                            message: format!("Installing bootloader to {}...", boot_drive),
+                            stage: OperationStage::Partitioning,
+                            message: format!(
+                                "Partitioning {} (NTFS + UEFI:NTFS, {})...",
+                                dev_node,
+                                if is_gpt { "GPT" } else { "MBR" }
+                            ),
                         });
 
-                        let bootsect_path = if std::path::Path::new(r"C:\Windows\System32\bootsect.exe").exists() {
-                            "C:\\Windows\\System32\\bootsect.exe".to_string()
-                        } else {
-                            let local_bootsect = format!("{}\\boot\\bootsect.exe", mp_final);
-                            if std::path::Path::new(&local_bootsect).exists() {
-                                local_bootsect
-                            } else {
-                                "bootsect.exe".to_string()
-                            }
-                        };
+                        let (part1, part2) = usb_x_platform::linux::create_windows_dual_partition_on_disk(
+                            dev_node,
+                            is_gpt,
+                            device.size_bytes,
+                            1,
+                        )?;
 
-                        let res = std::process::Command::new(&bootsect_path)
-                            .args(&["/nt60", &boot_drive, "/mbr", "/force"])
-                            .output();
-
-                        match res {
-                            Ok(out) if out.status.success() => {
-                                let _ = sender.send(OperationEvent::Log {
-                                    level: LogLevel::Info,
-                                    timestamp: "Now".to_string(),
-                                    message: format!("Successfully installed bootloader to {} and MBR.", boot_drive),
-                                });
-                            }
-                            Ok(out) => {
-                                let err_msg = String::from_utf8_lossy(&out.stderr);
-                                let _ = sender.send(OperationEvent::Log {
-                                    level: LogLevel::Warn,
-                                    timestamp: "Now".to_string(),
-                                    message: format!("bootsect notice: {}", err_msg.trim()),
-                                });
-                            }
-                            Err(e) => {
-                                let _ = sender.send(OperationEvent::Log {
-                                    level: LogLevel::Warn,
-                                    timestamp: "Now".to_string(),
-                                    message: format!("Notice: bootsect was not invoked: {}", e),
-                                });
-                            }
-                        }
-                    }
-
-                    // For UEFI Boot (Linux & Windows): ensure /EFI/BOOT/bootx64.efi exists
-                    let efi_boot_dir = std::path::Path::new(&mp_final).join("EFI").join("BOOT");
-                    if efi_boot_dir.exists() {
-                        let bootx64 = efi_boot_dir.join("bootx64.efi");
-                        let grubx64 = efi_boot_dir.join("grubx64.efi");
-                        if !bootx64.exists() && grubx64.exists() {
-                            let _ = std::fs::copy(&grubx64, &bootx64);
-                            let _ = sender.send(OperationEvent::Log {
-                                level: LogLevel::Info,
-                                timestamp: "Now".to_string(),
-                                message: "Configured UEFI boot fallback: copied grubx64.efi -> bootx64.efi".to_string(),
-                            });
-                        }
-                    }
-
-                    usb_x_platform::notify_drive_ready(&mp_final);
-                }
-
-                let _ = sender.send(OperationEvent::Log {
-                    level: LogLevel::Info,
-                    timestamp: "Now".to_string(),
-                    message: format!("ISO Media created successfully on {}. Ready to boot PC!", mp_final),
-                });
-            }
-
-            // If Linux persistence is requested
-            if let Some(persist_mb) = linux_persistence_mb {
-                if *persist_mb > 0 {
-                    let _ = sender.send(OperationEvent::StageChanged {
-                        stage: OperationStage::CreatingPersistence,
-                        message: format!("Allocating Linux persistence partition ({} MB)...", persist_mb),
-                    });
-                    let _ = sender.send(OperationEvent::Log {
-                        level: LogLevel::Info,
-                        timestamp: "Now".to_string(),
-                        message: format!("Configured persistence storage: {} MB", persist_mb),
-                    });
-                }
-            }
-        }
-        OperationKind::CreateFreeDosMedia { partition_scheme, file_system } => {
-            let _ = sender.send(OperationEvent::StageChanged {
-                stage: OperationStage::Partitioning,
-                message: format!("Partitioning for FreeDOS ({}, {})...", partition_scheme.label(), file_system.label()),
-            });
-            let _ = sender.send(OperationEvent::StageChanged {
-                stage: OperationStage::Formatting,
-                message: "Writing FreeDOS system files (KERNEL.SYS, COMMAND.COM)...".to_string(),
-            });
-            let _ = sender.send(OperationEvent::Log {
-                level: LogLevel::Info,
-                timestamp: "Now".to_string(),
-                message: "FreeDOS boot media prepared successfully.".to_string(),
-            });
-        }
-        OperationKind::CreateMsDosMedia { files_folder, .. } => {
-            let _ = sender.send(OperationEvent::StageChanged {
-                stage: OperationStage::Formatting,
-                message: format!("Installing MS-DOS files from folder '{}'...", files_folder),
-            });
-            let _ = sender.send(OperationEvent::Log {
-                level: LogLevel::Info,
-                timestamp: "Now".to_string(),
-                message: "User-supplied MS-DOS boot media prepared.".to_string(),
-            });
-        }
-        OperationKind::CreateWindowsToGo { image, .. } => {
-            let _ = sender.send(OperationEvent::StageChanged {
-                stage: OperationStage::Formatting,
-                message: "Preparing Windows To Go workspace on external drive...".to_string(),
-            });
-            crate::raw_writer::execute_raw_write(
-                backend,
-                &device.id,
-                &image.path,
-                true,
-                sender,
-                cancelled,
-            )?;
-            let _ = sender.send(OperationEvent::Log {
-                level: LogLevel::Info,
-                timestamp: "Now".to_string(),
-                message: "Windows To Go deployment finished.".to_string(),
-            });
-        }
-        #[allow(unused_variables)]
-        OperationKind::FormatOnly { partition_scheme, file_system, volume_label, quick_format, cluster_size, .. } => {
-            let _ = sender.send(OperationEvent::StageChanged {
-                stage: OperationStage::Partitioning,
-                message: format!("Preparing {} partition structure...", partition_scheme.label()),
-            });
-
-            #[cfg(windows)]
-            let disk_num_opt: Option<u32> = device.id.as_str()
-                .strip_prefix("PhysicalDrive")
-                .and_then(|s| s.parse::<u32>().ok());
-
-            #[allow(unused_mut)]
-            let mut has_multiple_partitions = device.partitions.len() > 1;
-
-            #[cfg(windows)]
-            if let Some(disk_num) = disk_num_opt {
-                if disk_num != 0 {
-                    let vols = usb_x_platform::get_volumes_for_disk(disk_num);
-                    if vols.len() > 1 {
-                        has_multiple_partitions = true;
-                    }
-                }
-            }
-
-            let fs_str = file_system.as_str();
-            let is_fat32 = matches!(file_system, usb_x_core::types::FileSystem::Fat32);
-            let bytes_cs = cluster_size.to_bytes();
-
-            #[cfg(windows)]
-            {
-                if let Some(disk_num) = disk_num_opt {
-                    if has_multiple_partitions {
                         let _ = sender.send(OperationEvent::Log {
                             level: LogLevel::Info,
                             timestamp: "Now".to_string(),
-                            message: format!("Multiple partitions detected on PhysicalDrive{}. Deleting all partitions and recreating clean 100% capacity partition...", disk_num),
+                            message: format!(
+                                "Created NTFS + UEFI:NTFS partition layout on {}: {} (NTFS) + {} (UEFI:NTFS)",
+                                dev_node, part1, part2
+                            ),
                         });
-                        let _ = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, is_fat32);
-                        if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
-                            let _ = sender.send(OperationEvent::StageChanged {
-                                stage: OperationStage::Formatting,
-                                message: format!("Formatting volume {} as {} ({}) via native Win32 FormatEx...", cand, fs_str, volume_label),
+
+                        let _ = sender.send(OperationEvent::StageChanged {
+                            stage: OperationStage::Formatting,
+                            message: format!("Writing UEFI:NTFS bootloader to {}...", part2),
+                        });
+                        usb_x_platform::linux::write_uefi_ntfs_partition(&part2, UEFI_NTFS_IMG)?;
+                        let _ = sender.send(OperationEvent::Log {
+                            level: LogLevel::Info,
+                            timestamp: "Now".to_string(),
+                            message: format!(
+                                "Wrote UEFI:NTFS boot image to {} ({:.1} MB)",
+                                part2,
+                                UEFI_NTFS_IMG.len() as f64 / (1024.0 * 1024.0)
+                            ),
+                        });
+
+                        let _ = sender.send(OperationEvent::StageChanged {
+                            stage: OperationStage::Formatting,
+                            message: format!("Formatting {} as NTFS ({})...", part1, raw_label),
+                        });
+                        usb_x_platform::linux::format_partition_volume_with_options(
+                            &part1,
+                            "NTFS",
+                            &raw_label,
+                            cluster_bytes_opt,
+                            *quick_format,
+                        )?;
+
+                        // Extract full Windows ISO ONCE onto Partition 1 (NTFS Data) via native kernel ntfs3
+                        {
+                            let p1_guard = usb_x_platform::linux::mount_volume_fs(&part1, Some("NTFS"))?;
+                            let p1_mp = p1_guard.mount_point.to_string_lossy().to_string();
+                            mp_final = p1_mp.clone();
+
+                            let _ = sender.send(OperationEvent::Log {
+                                level: LogLevel::Info,
+                                timestamp: "Now".to_string(),
+                                message: format!("Target partition {} mounted at {}", part1, p1_mp),
                             });
-                            let _ = usb_x_platform::format_drive_volume(&cand, fs_str, volume_label, *quick_format, bytes_cs);
-                            usb_x_platform::notify_drive_ready(&cand);
+
+                            crate::iso_extractor::copy_mounted_iso_to_target(&source_root, &p1_mp, false, sender, cancelled)?;
+                            write_extended_label_if_enabled(&p1_mp, *extended_label, &raw_label, sender);
+                            crate::iso_extractor::ensure_uefi_boot_fallback(&p1_mp, sender);
+
+                            if !is_gpt {
+                                match usb_x_platform::linux::install_legacy_bios_windows_grub(
+                                    dev_node,
+                                    &p1_guard.mount_point,
+                                    Some(&part1),
+                                    *rufus_mbr_bios_id,
+                                ) {
+                                    Ok(_) => {
+                                        let _ = sender.send(OperationEvent::Log {
+                                            level: LogLevel::Info,
+                                            timestamp: "Now".to_string(),
+                                            message: format!(
+                                                "Installed Legacy BIOS MBR bootloader (GRUB -> BOOTMGR{}).",
+                                                rufus_mbr_bios_id.map(|id| format!(", BIOS ID 0x{:02X}", id)).unwrap_or_default()
+                                            ),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = sender.send(OperationEvent::Log {
+                                            level: LogLevel::Warn,
+                                            timestamp: "Now".to_string(),
+                                            message: format!("Legacy BIOS MBR notice: {}", e),
+                                        });
+                                    }
+                                }
+                            }
+
+                            drop(p1_guard);
                         }
-                    } else if let Some(first_part) = device.partitions.first() {
-                        if let Some(ref mp) = first_part.mount_point {
+                    } else {
+                        // Single-Partition Layout (or Linux ISO + Persistence Partition when linux_persistence_mb > 0)
+                        let persist_mb_opt = if !is_win_effective {
+                            linux_persistence_mb.filter(|&mb| mb > 0)
+                        } else {
+                            None
+                        };
+
+                        let (part_dev, persist_part_opt) = if let Some(pmb) = persist_mb_opt {
                             let _ = sender.send(OperationEvent::StageChanged {
-                                stage: OperationStage::Formatting,
-                                message: format!("Formatting volume {} as {} ({}) via native Win32 FormatEx...", mp, fs_str, volume_label),
+                                stage: OperationStage::Partitioning,
+                                message: format!(
+                                    "Partitioning {} (ISO + {} MB persistence, {})...",
+                                    dev_node, pmb, if is_gpt { "GPT" } else { "MBR" }
+                                ),
                             });
-                            let _ = usb_x_platform::format_drive_volume(mp, fs_str, volume_label, *quick_format, bytes_cs);
-                            usb_x_platform::notify_drive_ready(mp);
+                            let (p1, p2) = usb_x_platform::linux::create_partition_with_persistence_on_disk(
+                                dev_node,
+                                is_gpt,
+                                req_fat32,
+                                device.size_bytes,
+                                pmb,
+                            )?;
+                            (p1, Some((p2, pmb)))
+                        } else {
+                            let _ = sender.send(OperationEvent::StageChanged {
+                                stage: OperationStage::Partitioning,
+                                message: format!(
+                                    "Partitioning {} ({} capacity, {})...",
+                                    dev_node,
+                                    if *old_bios_fixes && !is_gpt { "MBR + old-BIOS alignment" } else { "100%" },
+                                    if is_gpt { "GPT" } else { "MBR" }
+                                ),
+                            });
+                            let p1 = usb_x_platform::linux::create_partition_on_disk_ex(
+                                dev_node,
+                                is_gpt,
+                                req_fat32,
+                                *old_bios_fixes,
+                                device.size_bytes,
+                            )?;
+                            (p1, None)
+                        };
+
+                        let _ = sender.send(OperationEvent::Log {
+                            level: LogLevel::Info,
+                            timestamp: "Now".to_string(),
+                            message: format!("Created partition {} on {}", part_dev, dev_node),
+                        });
+
+                        let _ = sender.send(OperationEvent::StageChanged {
+                            stage: OperationStage::Formatting,
+                            message: format!("Formatting {} as {} ({})...", part_dev, fs_str, effective_label),
+                        });
+                        usb_x_platform::linux::format_partition_volume_with_options(
+                            &part_dev,
+                            fs_str,
+                            &effective_label,
+                            cluster_bytes_opt,
+                            *quick_format,
+                        )?;
+
+                        let target_guard = usb_x_platform::linux::mount_volume_fs(&part_dev, Some(fs_str))?;
+                        mp_final = target_guard.mount_point.to_string_lossy().to_string();
+
+                        let _ = sender.send(OperationEvent::Log {
+                            level: LogLevel::Info,
+                            timestamp: "Now".to_string(),
+                            message: format!("Target drive ready for writing: {}", mp_final),
+                        });
+
+                        crate::iso_extractor::copy_mounted_iso_to_target(&source_root, &mp_final, req_fat32, sender, cancelled)?;
+                        write_extended_label_if_enabled(&mp_final, *extended_label, &raw_label, sender);
+
+                        if is_win_effective && !is_gpt {
+                            let _ = usb_x_platform::linux::install_legacy_bios_windows_grub(
+                                dev_node,
+                                &target_guard.mount_point,
+                                Some(&part_dev),
+                                *rufus_mbr_bios_id,
+                            );
                         }
+
+                        crate::iso_extractor::ensure_uefi_boot_fallback(&mp_final, sender);
+                        drop(target_guard);
+
+                        if let Some((persist_part, pmb)) = persist_part_opt {
+                            let _ = sender.send(OperationEvent::StageChanged {
+                                stage: OperationStage::CreatingPersistence,
+                                message: format!("Formatting Linux persistence partition {} ({} MB ext4)...", persist_part, pmb),
+                            });
+                            let lower_p = image.path.to_ascii_lowercase();
+                            let persist_label = if lower_p.contains("debian") || lower_p.contains("kali") {
+                                "persistence"
+                            } else {
+                                "writable"
+                            };
+                            usb_x_platform::linux::setup_linux_persistence_partition(&persist_part, persist_label)?;
+                            let _ = sender.send(OperationEvent::Log {
+                                level: LogLevel::Info,
+                                timestamp: "Now".to_string(),
+                                message: format!(
+                                    "Created ext4 persistence storage ({} MB, label '{}') on {}",
+                                    pmb, persist_label, persist_part
+                                ),
+                            });
+                        }
+                    }
+
+                    drop(iso_mount);
+                    let _ = sender.send(OperationEvent::Log {
+                        level: LogLevel::Info,
+                        timestamp: "Now".to_string(),
+                        message: format!("Dismounted source ISO {}", source_root),
+                    });
+
+                    let _ = usb_x_platform::linux::unmount_device_all(device.id.as_str());
+                }
+
+                #[cfg(all(not(windows), not(target_os = "linux")))]
+                {
+                    let _ = (target_system, cluster_bytes_opt, quick_format, extended_label, old_bios_fixes, rufus_mbr_bios_id, linux_persistence_mb);
+                    return Err(UsbXError::UnsupportedCapability(
+                        "Native ISO flashing is not supported on this OS".to_string(),
+                    ));
+                }
+
+                let _ = sender.send(OperationEvent::Log {
+                    level: LogLevel::Info,
+                    timestamp: "Now".to_string(),
+                    message: format!("ISO media created successfully ({})", mp_final),
+                });
+            }
+        }
+        OperationKind::FormatOnly {
+            partition_scheme,
+            file_system,
+            volume_label,
+            quick_format,
+            extended_label,
+            cluster_size,
+            check_bad_blocks_passes,
+            old_bios_fixes,
+            rufus_mbr_bios_id: _,
+        } => {
+            if let Some(passes) = check_bad_blocks_passes {
+                crate::flash_test::execute_bad_blocks_check(
+                    backend,
+                    &device.id,
+                    device.size_bytes,
+                    *passes,
+                    sender,
+                    cancelled,
+                )?;
+                let _ = backend.unmount_and_lock(&device.id);
+            }
+
+            let _ = sender.send(OperationEvent::StageChanged {
+                stage: OperationStage::Partitioning,
+                message: format!("Partitioning {} ({})...", device.device_path, partition_scheme.label()),
+            });
+
+            let fs_str = file_system.as_str();
+            let is_fat32 = matches!(file_system, FileSystem::Fat32);
+
+            #[cfg(windows)]
+            {
+                let disk_num_opt: Option<u32> = device.id.as_str()
+                    .strip_prefix("PhysicalDrive")
+                    .and_then(|s| s.parse::<u32>().ok());
+                if let Some(disk_num) = disk_num_opt {
+                    let _ = usb_x_platform::clean_and_repartition_disk(disk_num, device.size_bytes, is_fat32);
+                    if let Some(cand) = usb_x_platform::wait_for_volume_ready(disk_num, 4000) {
+                        let _ = sender.send(OperationEvent::StageChanged {
+                            stage: OperationStage::Formatting,
+                            message: format!("Formatting {} as {} ({})...", cand, fs_str, volume_label),
+                        });
+                        let _ = usb_x_platform::format_drive_volume(&cand, fs_str, volume_label, *quick_format, cluster_size.to_bytes());
+                        write_extended_label_if_enabled(&cand, *extended_label, volume_label, sender);
+                        usb_x_platform::notify_drive_ready(&cand);
                     }
                 }
             }
 
             #[cfg(target_os = "linux")]
             {
-                let is_gpt = matches!(partition_scheme, usb_x_core::types::PartitionScheme::Gpt);
-                if has_multiple_partitions {
-                    let _ = sender.send(OperationEvent::Log {
-                        level: LogLevel::Info,
-                        timestamp: "Now".to_string(),
-                        message: format!("Multiple partitions detected on {}. Wiping and recreating single partition...", device.id),
-                    });
-                    if let Ok(part_dev) = usb_x_platform::linux::create_partition_on_disk(device.id.as_str(), is_gpt, is_fat32) {
-                        let _ = sender.send(OperationEvent::StageChanged {
-                            stage: OperationStage::Formatting,
-                            message: format!("Formatting partition {} as {} ({})...", part_dev, fs_str, volume_label),
-                        });
-                        let _ = usb_x_platform::linux::format_partition_volume(&part_dev, fs_str, volume_label);
+                let is_gpt = matches!(partition_scheme, PartitionScheme::Gpt);
+                let part_dev = usb_x_platform::linux::create_partition_on_disk_ex(
+                    device.id.as_str(),
+                    is_gpt,
+                    is_fat32,
+                    *old_bios_fixes,
+                    device.size_bytes,
+                )?;
+
+                let _ = sender.send(OperationEvent::StageChanged {
+                    stage: OperationStage::Formatting,
+                    message: format!("Formatting partition {} as {} ({})...", part_dev, fs_str, volume_label),
+                });
+                usb_x_platform::linux::format_partition_volume_with_options(
+                    &part_dev,
+                    fs_str,
+                    volume_label,
+                    format_cluster_opt(*cluster_size),
+                    *quick_format,
+                )?;
+
+                if *extended_label && !volume_label.trim().is_empty() {
+                    if let Ok(guard) = usb_x_platform::linux::mount_volume_fs(&part_dev, Some(fs_str)) {
+                        let mp = guard.mount_point.to_string_lossy().to_string();
+                        write_extended_label_if_enabled(&mp, true, volume_label, sender);
+                        let _ = std::process::Command::new("sync").arg("-f").arg(&mp).status();
                     }
-                } else if let Some(first_part) = device.partitions.first() {
-                    let part_dev = format!("{}{}", device.id, first_part.number);
-                    let _ = usb_x_platform::linux::format_partition_volume(&part_dev, fs_str, volume_label);
                 }
+                let _ = usb_x_platform::linux::unmount_device_all(device.id.as_str());
             }
+
+            #[cfg(all(not(windows), not(target_os = "linux")))]
+            let _ = (volume_label, quick_format, extended_label, cluster_size, old_bios_fixes, fs_str, is_fat32);
 
             backend.flush(&device.id)?;
             let _ = sender.send(OperationEvent::Log {
                 level: LogLevel::Info,
                 timestamp: "Now".to_string(),
-                message: format!("Formatted device as {} with label '{}'. Drive is ready and accessible in Windows Explorer.", file_system.label(), volume_label),
+                message: format!("Formatted {} as {} ('{}'). Ready.", device.device_path, file_system.as_str(), volume_label),
             });
         }
-        OperationKind::BackupDrive { output_file_path, .. } => {
+        OperationKind::BackupDrive { output_file_path } => {
             crate::backup_restore::execute_backup_drive(
                 backend,
                 &device.id,
                 device.size_bytes,
                 output_file_path,
-                sender,
-                cancelled,
-            )?;
-        }
-        OperationKind::RestoreDrive { backup_image_path, verify } => {
-            crate::backup_restore::execute_restore_drive(
-                backend,
-                &device.id,
-                device.size_bytes,
-                backup_image_path,
-                *verify,
-                sender,
-                cancelled,
-            )?;
-        }
-        OperationKind::FlashTest { kind } => {
-            crate::flash_test::execute_flash_test(
-                backend,
-                &device.id,
-                device.size_bytes,
-                *kind,
                 sender,
                 cancelled,
             )?;
@@ -688,3 +788,22 @@ fn run_pipeline(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_uefi_ntfs_img_embedded_and_writable() {
+        const UEFI_NTFS_IMG: &[u8] = include_bytes!("../assets/uefi-ntfs.img");
+        assert_eq!(UEFI_NTFS_IMG.len(), 1_048_576);
+        assert_eq!(UEFI_NTFS_IMG[510], 0x55);
+        assert_eq!(UEFI_NTFS_IMG[511], 0xAA);
+        assert_eq!(&UEFI_NTFS_IMG[54..59], b"FAT12");
+
+        let tmp = std::env::temp_dir().join(format!("pigeon_uefi_ntfs_test_{}.img", std::process::id()));
+        std::fs::write(&tmp, vec![0u8; UEFI_NTFS_IMG.len()]).unwrap();
+        usb_x_platform::linux::write_uefi_ntfs_partition(&tmp.to_string_lossy(), UEFI_NTFS_IMG).unwrap();
+        let written = std::fs::read(&tmp).unwrap();
+        assert_eq!(written, UEFI_NTFS_IMG);
+        let _ = std::fs::remove_file(&tmp);
+    }
+}

@@ -17,10 +17,10 @@ pub use file_dialog::{has_native_file_dialog, open_file_dialog, open_file_dialog
 
 #[cfg(windows)]
 pub use windows::disk_io::{
-    clean_and_repartition_disk, create_mbr_partition_on_disk, format_drive_volume,
-    get_volumes_for_disk, get_windows_accent_color, get_windows_version_string,
+    clean_and_repartition_disk, create_mbr_partition_on_disk, create_windows_uefi_ntfs_layout,
+    format_drive_volume, get_volumes_for_disk, get_windows_accent_color, get_windows_version_string,
     is_elevated_admin, is_system_dark_mode, mount_iso_virtdisk, notify_drive_ready,
-    relaunch_as_admin, wait_for_volume_ready, VirtualIsoMount, VolumeInfo,
+    relaunch_as_admin, wait_for_partition_volume_ready, wait_for_volume_ready, VirtualIsoMount, VolumeInfo,
 };
 #[cfg(windows)]
 pub use windows::c_bindings;

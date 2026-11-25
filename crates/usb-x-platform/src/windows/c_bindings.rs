@@ -53,6 +53,14 @@ extern "C" {
         is_fat32: c_int,
     ) -> c_int;
 
+    pub fn c_create_windows_uefi_ntfs_layout_on_handle(
+        h_disk: *mut c_void,
+        total_size_bytes: c_ulonglong,
+        is_gpt: c_int,
+        uefi_ntfs_img: *const c_uchar,
+        uefi_ntfs_len: c_uint,
+    ) -> c_int;
+
     pub fn c_mount_iso_virtdisk(
         iso_path: *const u16,
         out_vdisk_handle: *mut *mut c_void,

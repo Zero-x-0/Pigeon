@@ -1,7 +1,6 @@
 use crate::device::DeviceInfo;
 use crate::errors::{Result, UsbXError};
 use crate::plan::{OperationKind, OperationPlan};
-use crate::types::FileSystem;
 
 pub fn validate_plan(plan: &OperationPlan, device: &DeviceInfo) -> Result<()> {
     // 1. Safety check: target device must not be a protected system disk
@@ -20,30 +19,15 @@ pub fn validate_plan(plan: &OperationPlan, device: &DeviceInfo) -> Result<()> {
     }
 
     // 3. Operation-specific validations
-    match &plan.kind {
-        OperationKind::WriteImage {
-            image,
-            file_system,
-            ..
-        } => {
-            if image.file_size > device.size_bytes {
-                return Err(UsbXError::SafetyViolation(format!(
-                    "Image file size ({} bytes) exceeds target device capacity ({} bytes).",
-                    image.file_size, device.size_bytes
-                )));
-            }
-
-            if *file_system == FileSystem::Fat32 && image.is_wim_split_needed {
-                // Not necessarily fatal if split WIM or Rufus UEFI:NTFS bridge is used,
-                // but validation notes it
-            }
+    if let OperationKind::WriteImage { image, .. } = &plan.kind {
+        // Uncompressed image must fit within target device capacity; compressed size may expand
+        if image.compressed_format().is_none() && image.file_size > device.size_bytes {
+            return Err(UsbXError::SafetyViolation(format!(
+                "Image file size ({} bytes) exceeds target device capacity ({} bytes).",
+                image.file_size, device.size_bytes
+            )));
         }
-        OperationKind::RestoreDrive { .. } => {
-            // Restore requires explicit confirmation
-        }
-        _ => {}
     }
 
     Ok(())
 }
-

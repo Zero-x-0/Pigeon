@@ -1,31 +1,22 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootSelectionMode {
     DiskImage,
-    FreeDos,
-    MsDosUserFiles,
-    BackupDrive,
-    RestoreDrive,
     FormatOnly,
-    FlashTest,
+    BackupDrive,
 }
 
 impl BootSelectionMode {
     pub fn label(&self) -> &'static str {
         match self {
             Self::DiskImage => "Disk or ISO image (Please select)",
-            Self::FreeDos => "FreeDOS",
-            Self::MsDosUserFiles => "MS-DOS (user-supplied files)",
+            Self::FormatOnly => "Non bootable",
             Self::BackupDrive => "Drive Image Backup (.img)",
-            Self::RestoreDrive => "Restore Drive from Image",
-            Self::FormatOnly => "Non bootable (Format only)",
-            Self::FlashTest => "Bad Block & Fake Flash Drive Test",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartitionScheme {
-    Auto,
     Mbr,
     Gpt,
 }
@@ -33,64 +24,54 @@ pub enum PartitionScheme {
 impl PartitionScheme {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Recommended)",
-            Self::Mbr => "MBR (Legacy BIOS / UEFI-CSM)",
-            Self::Gpt => "GPT (UEFI non-CSM)",
+            Self::Mbr => "MBR",
+            Self::Gpt => "GPT",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetSystem {
-    Auto,
     Uefi,
     Bios,
-    BiosAndUefi,
 }
 
 impl TargetSystem {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Target System)",
             Self::Uefi => "UEFI (non CSM)",
-            Self::Bios => "BIOS (or UEFI-CSM)",
-            Self::BiosAndUefi => "BIOS + UEFI (Dual mode)",
+            Self::Bios => "BIOS or UEFI",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileSystem {
-    Auto,
     Fat32,
     Ntfs,
     ExFat,
-    Udf,
 }
 
 impl FileSystem {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Recommended)",
             Self::Fat32 => "FAT32 (Default)",
             Self::Ntfs => "NTFS",
             Self::ExFat => "exFAT",
-            Self::Udf => "UDF",
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Auto | Self::Fat32 => "FAT32",
+            Self::Fat32 => "FAT32",
             Self::Ntfs => "NTFS",
             Self::ExFat => "exFAT",
-            Self::Udf => "UDF",
         }
     }
 
     pub fn max_file_size(&self) -> Option<u64> {
         match self {
-            Self::Fat32 => Some(4_294_967_295), // 4 GiB - 1 byte
+            Self::Fat32 => Some(4_294_967_295),
             _ => None,
         }
     }
@@ -112,12 +93,12 @@ pub enum ClusterSize {
 impl ClusterSize {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Default => "Default (Recommended)",
+            Self::Default => "4096 bytes (Default)",
             Self::Bytes512 => "512 bytes",
-            Self::Bytes1024 => "1024 bytes (1 KB)",
-            Self::Bytes2048 => "2048 bytes (2 KB)",
-            Self::Bytes4096 => "4096 bytes (4 KB)",
-            Self::Bytes8192 => "8192 bytes (8 KB)",
+            Self::Bytes1024 => "1024 bytes",
+            Self::Bytes2048 => "2048 bytes",
+            Self::Bytes4096 => "4096 bytes",
+            Self::Bytes8192 => "8192 bytes",
             Self::Bytes16384 => "16 kilobytes",
             Self::Bytes32768 => "32 kilobytes",
             Self::Bytes65536 => "64 kilobytes",
@@ -138,13 +119,55 @@ impl ClusterSize {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressedFormat {
+    Gzip,
+    Xz,
+    Bzip2,
+    Zstd,
+}
+
+impl CompressedFormat {
+    pub fn from_path(path: &str) -> Option<Self> {
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".gz") {
+            Some(Self::Gzip)
+        } else if lower.ends_with(".xz") {
+            Some(Self::Xz)
+        } else if lower.ends_with(".bz2") {
+            Some(Self::Bzip2)
+        } else if lower.ends_with(".zst") {
+            Some(Self::Zstd)
+        } else {
+            None
+        }
+    }
+
+    pub fn tool_name(&self) -> &'static str {
+        match self {
+            Self::Gzip => "gzip",
+            Self::Xz => "xz",
+            Self::Bzip2 => "bzip2",
+            Self::Zstd => "zstd",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Gzip => "GZIP",
+            Self::Xz => "XZ",
+            Self::Bzip2 => "BZIP2",
+            Self::Zstd => "ZSTD",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageDetectedType {
     Windows11Installer { version: String },
     Windows10Installer { version: String },
     WindowsLegacy { name: String },
     LinuxHybridIso { distro: String },
-    FreeDosImage,
     GenericDiskImage,
     Unknown,
 }
@@ -155,8 +178,7 @@ impl ImageDetectedType {
             Self::Windows11Installer { .. } => "Windows 11 Installer",
             Self::Windows10Installer { .. } => "Windows 10 Installer",
             Self::WindowsLegacy { .. } => "Windows Installation Media",
-            Self::LinuxHybridIso { .. } => "Linux ISOHybrid (GRUB)",
-            Self::FreeDosImage => "FreeDOS",
+            Self::LinuxHybridIso { .. } => "Linux ISOHybrid",
             Self::GenericDiskImage => "Disk Image",
             Self::Unknown => "Unknown Image",
         }
@@ -165,36 +187,15 @@ impl ImageDetectedType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageWriteMode {
-    Auto,
-    DdImageMode,
     IsoImageMode,
+    DdImageMode,
 }
 
 impl ImageWriteMode {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Auto => "ISO Image mode (Recommended)",
-            Self::DdImageMode => "DD Image mode (Raw Disk Copy)",
-            Self::IsoImageMode => "ISO Image mode (Recommended - Bootable USB & Full Drive)",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecureBootStatus {
-    PreservedSignedChain,
-    SignedBridgeChain,
-    UnsignedLikelyBlocked,
-    NotApplicable,
-}
-
-impl SecureBootStatus {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::PreservedSignedChain => "Preserved signed chain (Secure Boot supported)",
-            Self::SignedBridgeChain => "Signed UEFI bridge (Secure Boot compatible)",
-            Self::UnsignedLikelyBlocked => "Custom / Unsigned (Requires Secure Boot disabled)",
-            Self::NotApplicable => "N/A (Legacy BIOS or data only)",
+            Self::IsoImageMode => "Write in ISO Image mode (Recommended)",
+            Self::DdImageMode => "Write in DD Image mode",
         }
     }
 }
@@ -238,40 +239,19 @@ impl SystemDiskRisk {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Windows11Tweaks {
-    pub bypass_tpm_secure_boot_ram: bool,
-    pub bypass_online_account: bool,
-    pub disable_telemetry_privacy: bool,
-    pub disable_bitlocker_device_encryption: bool,
-    pub create_local_account: bool,
-    pub local_username: String,
-}
-
-impl Default for Windows11Tweaks {
-    fn default() -> Self {
-        Self {
-            bypass_tpm_secure_boot_ram: true,
-            bypass_online_account: true,
-            disable_telemetry_privacy: true,
-            disable_bitlocker_device_encryption: true,
-            create_local_account: true,
-            local_username: "User".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlashTestKind {
-    ReadOnlyBadBlockScan,
-    DestructiveFakeCapacityTest,
+pub enum ThemePreference {
+    System,
+    Light,
+    Dark,
 }
 
-impl FlashTestKind {
+impl ThemePreference {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::ReadOnlyBadBlockScan => "Read-only surface test (Safe)",
-            Self::DestructiveFakeCapacityTest => "Destructive write & read test (Detects Fake Flash)",
+            Self::System => "System Default",
+            Self::Light => "Light (Classic Rufus)",
+            Self::Dark => "Dark",
         }
     }
 }

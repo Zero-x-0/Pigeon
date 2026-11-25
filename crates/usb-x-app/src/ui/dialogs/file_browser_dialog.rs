@@ -88,9 +88,9 @@ fn get_system_drives() -> Vec<(String, PathBuf)> {
         let path = PathBuf::from(&root);
         if path.exists() {
             let label = if (letter as char) == 'C' {
-                format!("🗄 System ({}:)", letter as char)
+                format!("System ({}:)", letter as char)
             } else {
-                format!("💾 Drive ({}:)", letter as char)
+                format!("Drive ({}:)", letter as char)
             };
             drives.push((label, path));
         }
@@ -101,26 +101,26 @@ fn get_system_drives() -> Vec<(String, PathBuf)> {
 #[cfg(not(windows))]
 fn get_system_drives() -> Vec<(String, PathBuf)> {
     let mut drives = Vec::new();
-    drives.push(("🗄 Root ( / )".to_string(), PathBuf::from("/")));
+    drives.push(("Root (/)".to_string(), PathBuf::from("/")));
 
     for mount_root in &["/media", "/mnt", "/run/media"] {
         let p = std::path::Path::new(mount_root);
         if p.is_dir() {
-            drives.push((format!("💾 {}", mount_root), p.to_path_buf()));
+            drives.push((mount_root.to_string(), p.to_path_buf()));
             if let Ok(entries) = std::fs::read_dir(p) {
                 for entry in entries.flatten() {
                     let sub = entry.path();
                     if sub.is_dir() {
                         let name = sub.file_name().unwrap_or_default().to_string_lossy().to_string();
                         if !name.starts_with('.') {
-                            drives.push((format!("  💾 {}", name), sub.clone()));
+                            drives.push((format!("  {}", name), sub.clone()));
                             if let Ok(user_entries) = std::fs::read_dir(&sub) {
                                 for ue in user_entries.flatten() {
                                     let usb_p = ue.path();
                                     if usb_p.is_dir() {
                                         let usb_name = usb_p.file_name().unwrap_or_default().to_string_lossy().to_string();
                                         if !usb_name.starts_with('.') {
-                                            drives.push((format!("    🔌 {}", usb_name), usb_p));
+                                            drives.push((format!("    [USB] {}", usb_name), usb_p));
                                         }
                                     }
                                 }
@@ -144,7 +144,7 @@ fn get_linux_user_homes() -> Vec<(String, PathBuf)> {
             if p.is_dir() {
                 let user = p.file_name().unwrap_or_default().to_string_lossy().to_string();
                 if !user.starts_with('.') {
-                    homes.push((format!("👤 {}", user), p));
+                    homes.push((user, p));
                 }
             }
         }
@@ -189,26 +189,26 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                     ui.horizontal(|ui| {
                         let can_back = state.file_browser_can_go_back();
-                        if ui.add_enabled(can_back, egui::Button::new(RichText::new("⬅").size(13.0))).on_hover_text("Back").clicked() {
+                        if ui.add_enabled(can_back, egui::Button::new(RichText::new("<").size(12.0))).on_hover_text("Back").clicked() {
                             state.file_browser_go_back();
                         }
 
                         let can_forward = state.file_browser_can_go_forward();
-                        if ui.add_enabled(can_forward, egui::Button::new(RichText::new("➡").size(13.0))).on_hover_text("Forward").clicked() {
+                        if ui.add_enabled(can_forward, egui::Button::new(RichText::new(">").size(12.0))).on_hover_text("Forward").clicked() {
                             state.file_browser_go_forward();
                         }
 
                         let can_up = state.file_browser_current_dir.parent().is_some();
-                        if ui.add_enabled(can_up, egui::Button::new(RichText::new("⬆ Up").strong().size(12.0))).on_hover_text("Go up one folder").clicked() {
+                        if ui.add_enabled(can_up, egui::Button::new(RichText::new("Up").strong().size(12.0))).on_hover_text("Go up one folder").clicked() {
                             state.file_browser_go_up();
                         }
 
-                        if ui.button(RichText::new("🔄").size(12.0)).on_hover_text("Refresh").clicked() {
+                        if ui.button(RichText::new("Refresh").size(11.5)).on_hover_text("Refresh").clicked() {
                             state.file_browser_error = None;
                         }
 
                         // Toggle between Breadcrumbs and Direct Text Edit
-                        let edit_icon = if state.file_browser_editing_path { "✕ Cancel" } else { "✏ Edit" };
+                        let edit_icon = if state.file_browser_editing_path { "Cancel" } else { "Edit Path" };
                         if ui.button(RichText::new(edit_icon).size(11.0)).clicked() {
                             state.file_browser_editing_path = !state.file_browser_editing_path;
                             if state.file_browser_editing_path {
@@ -224,7 +224,7 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                                     .hint_text("Type path and press Enter..."),
                             );
                             let enter_pressed = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            let go_clicked = ui.button(RichText::new("Go ➡").strong().size(11.5)).clicked();
+                            let go_clicked = ui.button(RichText::new("Go").strong().size(11.5)).clicked();
 
                             if enter_pressed || go_clicked {
                                 let target = PathBuf::from(&state.file_browser_path_input);
@@ -260,21 +260,21 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                         // Search Box on Right
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if !state.file_browser_search.is_empty() {
-                                if ui.button(RichText::new("✕").size(11.0)).on_hover_text("Clear search").clicked() {
+                                if ui.button(RichText::new("X").size(11.0)).on_hover_text("Clear search").clicked() {
                                     state.file_browser_search.clear();
                                 }
                             }
                             ui.add(
                                 egui::TextEdit::singleline(&mut state.file_browser_search)
                                     .desired_width(130.0)
-                                    .hint_text("🔍 Filter..."),
+                                    .hint_text("Filter..."),
                             );
                         });
                     });
 
                     if let Some(ref err) = state.file_browser_error {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("⚠ {}", err)).color(Color32::from_rgb(230, 80, 80)).size(11.5));
+                            ui.label(RichText::new(format!("[!] {}", err)).color(Color32::from_rgb(230, 80, 80)).size(11.5));
                         });
                     }
                 });
@@ -326,13 +326,13 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                             let filter_text = if state.file_browser_filter_all {
                                 "All Files (*.*)"
                             } else {
-                                "Disk Images (*.iso, *.img, *.raw)"
+                                "Disk Images (*.iso, *.img, *.xz, *.gz, *.zst)"
                             };
                             egui::ComboBox::from_id_salt("file_browser_filter_combo")
-                                .width(200.0)
+                                .width(240.0)
                                 .selected_text(filter_text)
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut state.file_browser_filter_all, false, "Disk Images (*.iso, *.img, *.raw)");
+                                    ui.selectable_value(&mut state.file_browser_filter_all, false, "Disk Images (*.iso, *.img, *.xz, *.gz, *.zst)");
                                     ui.selectable_value(&mut state.file_browser_filter_all, true, "All Files (*.*)");
                                 });
                         });
@@ -376,19 +376,19 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
 
                             if let Some(ref h) = home {
                                 let h_path = PathBuf::from(h);
-                                if ui.button("🏠 Home").clicked() {
+                                if ui.button("Home").clicked() {
                                     navigate_to_path = Some(h_path.clone());
                                 }
                                 let dt = h_path.join("Desktop");
-                                if dt.is_dir() && ui.button("🖥 Desktop").clicked() {
+                                if dt.is_dir() && ui.button("Desktop").clicked() {
                                     navigate_to_path = Some(dt);
                                 }
                                 let dl = h_path.join("Downloads");
-                                if dl.is_dir() && ui.button("📥 Downloads").clicked() {
+                                if dl.is_dir() && ui.button("Downloads").clicked() {
                                     navigate_to_path = Some(dl);
                                 }
                                 let doc = h_path.join("Documents");
-                                if doc.is_dir() && ui.button("📄 Documents").clicked() {
+                                if doc.is_dir() && ui.button("Documents").clicked() {
                                     navigate_to_path = Some(doc);
                                 }
                             }
@@ -481,7 +481,7 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                                     // 1. Folders
                                     for (fname, d_path) in dirs {
                                         ui.horizontal(|ui| {
-                                            let label = format!("📁 {}", fname);
+                                            let label = format!("[Dir] {}", fname);
                                             let resp = ui.selectable_label(false, RichText::new(label).strong().size(12.0));
                                             if resp.double_clicked() || (resp.clicked() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                                                 navigate_to_path = Some(d_path);
@@ -496,7 +496,12 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                                             || lower.ends_with(".img")
                                             || lower.ends_with(".bin")
                                             || lower.ends_with(".raw")
-                                            || lower.ends_with(".vhd");
+                                            || lower.ends_with(".vhd")
+                                            || lower.ends_with(".dd")
+                                            || lower.ends_with(".gz")
+                                            || lower.ends_with(".xz")
+                                            || lower.ends_with(".bz2")
+                                            || lower.ends_with(".zst");
 
                                         if !state.file_browser_filter_all && !is_disk_image {
                                             continue;
@@ -507,7 +512,7 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                                         let size_str = meta.as_ref().map(|m| format_file_size(m.len())).unwrap_or_default();
                                         let date_str = meta.as_ref().map(|m| format_file_time(m)).unwrap_or_default();
 
-                                        let icon = if is_disk_image { "💽" } else { "📄" };
+                                        let icon = if is_disk_image { "[IMG]" } else { "[File]" };
                                         let text_clr = if is_disk_image {
                                             if is_dark { Color32::from_rgb(110, 205, 255) } else { Color32::from_rgb(0, 102, 204) }
                                         } else {
@@ -545,7 +550,7 @@ pub fn show_file_browser_dialog(ctx: &Context, state: &mut AppState) {
                                             .color(Color32::from_rgb(230, 60, 60))
                                             .size(12.0),
                                     );
-                                    if ui.button("⬆ Go to Parent Folder").clicked() {
+                                    if ui.button("Go to Parent Folder").clicked() {
                                         state.file_browser_go_up();
                                     }
                                 }

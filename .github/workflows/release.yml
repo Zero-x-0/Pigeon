@@ -1,19 +1,51 @@
-name: Automatic Release Packaging & Publishing
+name: CI & Automatic Release Deployment
 
 on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+      - 'release-*'
+  pull_request:
+    branches: [main]
   release:
     types: [published, created]
-  push:
-    tags:
-      - '*'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Check & Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-xcb-dev libssl-dev
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Run Workspace Unit Tests
+        run: cargo test --workspace
+
   build-linux:
-    name: Build & Package Linux Binaries
+    name: Build Linux Packages (.AppImage, .deb, .rpm)
+    needs: verify
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
@@ -29,31 +61,22 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Compile Linux Release Binary
-        run: cargo build --release -p pigeon
+      - name: Build All Linux Release Packages
+        run: bash dist/linux/build-all-linux.sh
 
-      - name: Build Debian Package (.deb)
-        run: python3 dist/linux/package_deb.py
-
-      - name: Build RPM Package (.rpm)
-        run: python3 dist/linux/package_rpm.py
-
-      - name: Build AppImage (.AppImage)
-        run: python3 dist/linux/package_appimage.py
-
-      - name: Upload Linux Artifacts to GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
-          files: |
-            dist/linux/*.deb
-            dist/linux/*.rpm
-            dist/linux/*.AppImage
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: pigeon-linux-packages
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
 
   build-windows:
-    name: Build Windows x64 Executable
+    name: Build Windows Executable (.exe)
+    needs: verify
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
@@ -70,19 +93,48 @@ jobs:
       - name: Compile Windows Release Binary
         run: cargo build --release -p pigeon --target x86_64-pc-windows-gnu
 
-      - name: Prepare Windows Executable Packages
+      - name: Stage Windows Executables
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force -Path release
-          Copy-Item "target/x86_64-pc-windows-gnu/release/pigeon.exe" "release/pigeon-1.11.0-windows-x64.exe" -Force
-          Copy-Item "target/x86_64-pc-windows-gnu/release/pigeon.exe" "release/pigeon.exe" -Force
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          mkdir -p release
+          cp -f "target/x86_64-pc-windows-gnu/release/pigeon.exe" "release/pigeon-${VERSION}-windows-x64.exe"
+          cp -f "target/x86_64-pc-windows-gnu/release/pigeon.exe" "release/pigeon.exe"
 
-      - name: Upload Windows Artifacts to GitHub Release
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pigeon-windows-packages
+          path: |
+            release/*.exe
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows]
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd release-artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attach Release Packages to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name || github.ref_name }}
-          files: |
-            release/pigeon-1.11.0-windows-x64.exe
-            release/pigeon.exe
+          body_path: CHANGELOG.md
+          generate_release_notes: true
+          files: release-artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

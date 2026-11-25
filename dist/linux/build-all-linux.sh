@@ -24,7 +24,7 @@ echo "[4/4] Packaging AppImage..."
 python3 "$DIR/package_appimage.py"
 
 mkdir -p "$ROOT_DIR/release"
-cp -f "$DIR"/*.deb "$DIR"/*.rpm "$DIR"/*.AppImage "$ROOT_DIR/release/"
+mv -f "$DIR"/*.deb "$DIR"/*.rpm "$DIR"/*.AppImage "$ROOT_DIR/release/"
 
 echo "=========================================="
 echo "  All Linux Release Packages Built!       "
